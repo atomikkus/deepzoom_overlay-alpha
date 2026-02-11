@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.log
+cache/
+uploads/
+venv/
+.venv/
+.git/
+.gitignore
+.DS_Store
+*.swp
+

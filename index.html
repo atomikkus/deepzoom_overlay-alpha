@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WSI Viewer</title>
+
+    <!-- OpenSeadragon & Plugins -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/openseadragon/4.1.0/openseadragon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/geotiff-tilesource@latest/dist/geotiff-tilesource.min.js"></script>
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-content">
+            <h1 class="logo">
+                <span class="logo-icon">🔬</span>
+                WSI Viewer
+            </h1>
+            <div class="header-info">
+                <span id="slide-count" class="badge">0 slides</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="main-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <!-- Slides List -->
+            <div class="sidebar-section">
+                <h2 class="section-title">Available Slides</h2>
+                <div class="slides-list" id="slides-list">
+                    <p class="empty-state">No slides found in slides directory</p>
+                </div>
+            </div>
+
+            <!-- Slide Info -->
+            <div class="sidebar-section" id="info-section" style="display: none;">
+                <h2 class="section-title">Slide Information</h2>
+                <div class="info-content" id="info-content"></div>
+                <div class="info-actions"
+                    style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                    <!-- Cancer Density Controls -->
+                    <div id="density-controls">
+                        <button class="btn-primary" id="toggle-density-btn" onclick="toggleDensityOverlay()"
+                            style="width: 100%;">
+                            Show Cancer Density
+                        </button>
+                        <div id="density-slider-container" style="display: none; margin-top: 0.5rem;">
+                            <label for="density-opacity" style="font-size: 0.875rem; color: var(--text-muted);">
+                                Opacity: <span id="density-opacity-value">60</span>%
+                            </label>
+                            <input type="range" id="density-opacity" min="10" max="100" value="60"
+                                style="width: 100%; margin-top: 0.25rem;" oninput="updateDensityOpacity(this.value)">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Viewer Area -->
+        <main class="viewer-area">
+            <!-- Controls -->
+            <div class="controls-panel">
+                <button class="control-btn" id="zoom-in-btn" title="Zoom In">
+                    <span class="control-icon">➕</span>
+                </button>
+                <button class="control-btn" id="zoom-out-btn" title="Zoom Out">
+                    <span class="control-icon">➖</span>
+                </button>
+                <button class="control-btn" id="home-btn" title="Reset View">
+                    <span class="control-icon">🏠</span>
+                </button>
+                <button class="control-btn" id="rotate-btn" title="Rotate">
+                    <span class="control-icon">🔄</span>
+                </button>
+                <button class="control-btn" id="fullscreen-btn" title="Fullscreen">
+                    <span class="control-icon">⛶</span>
+                </button>
+            </div>
+
+            <!-- Viewer Container -->
+            <div class="viewer-container" id="viewer-container">
+                <div class="viewer-placeholder">
+                    <div class="placeholder-content">
+                        <div class="placeholder-icon">🔬</div>
+                        <h2 class="placeholder-title">No Slide Loaded</h2>
+                        <p class="placeholder-text">Select a slide from the sidebar to view</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Notification Toast -->
+    <div class="toast" id="toast"></div>
+
+    <!-- Scripts -->
+    <script src="viewer.js"></script>
+</body>
+
+</html>

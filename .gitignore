@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+uploads/*
+!uploads/.gitkeep
+cache/*
+!cache/.gitkeep
+
+# Sensitive files
+*.json
+!package.json
+!package-lock.json
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+*-read-access.json
+
+# Logs
+*.log
+logs/
+
+# OS files
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# Test files
+*.svs
+*.tif
+*.tiff
+*.vms
+*.vmu
+*.ndpi
+*.scn
+*.mrxs
+*.svslide
+*.bif
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
