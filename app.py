@@ -117,7 +117,7 @@ async def create_session(req: CreateSessionRequest):
 @app.delete("/api/sessions/{token}")
 @app.post("/api/sessions/{token}/delete")
 async def delete_session(token: str):
-    """Delete a session (called on tab close via beacon or explicit delete)."""
+    """Delete a session explicitly via API."""
     deleted = session_mgr.delete_session(token)
     return {"deleted": deleted}
 
@@ -645,9 +645,9 @@ async def startup_event():
     print("=" * 60)
     print("WSI Viewer Server (FastAPI)")
     print("=" * 60)
-    print(f"Default session: http://localhost:8009/{default_session.token}/")
-    print(f"Create new sessions: POST http://localhost:8009/api/sessions")
-    print(f"API docs: http://localhost:8009/docs")
+    print(f"Default session: http://localhost:8511/{default_session.token}/")
+    print(f"Create new sessions: POST http://localhost:8511/api/sessions")
+    print(f"API docs: http://localhost:8511/docs")
     print(f"Session TTL: {args.session_ttl} minutes")
     print(f"Supported formats: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
     print("=" * 60)
@@ -661,4 +661,4 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8009, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8511, reload=True)

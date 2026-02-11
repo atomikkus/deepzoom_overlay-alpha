@@ -24,11 +24,6 @@ if (SESSION_TOKEN) {
         fetch(`/api/sessions/${SESSION_TOKEN}/heartbeat`, { method: 'POST' })
             .catch(() => console.warn('Heartbeat failed'));
     }, 5 * 60 * 1000);
-
-    // Destroy session on tab close (sendBeacon only sends POST)
-    window.addEventListener('beforeunload', () => {
-        navigator.sendBeacon(`/api/sessions/${SESSION_TOKEN}/delete`, '');
-    });
 }
 
 // Formats that can be viewed directly without conversion
