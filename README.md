@@ -15,7 +15,9 @@ A modern, high-performance web application for viewing Whole Slide Imaging (WSI)
 - 🔍 **Interactive Viewer**: Zoom, pan, rotate, and fullscreen support using OpenSeadragon
 - 📊 **Overlay Support**: Cancer density overlay with opacity control and metadata display
 - 🔐 **Session-Based**: Multi-tenant with UUID tokens; each session has its own slides and overlay
+- 🔒 **Authentication**: HTTP Basic Auth for API endpoints with configurable credentials
 - ☁️ **GCS Integration**: Optional Google Cloud Storage for listing and downloading slides
+- 📍 **Multiple Paths**: Support for multiple slide sources (local and GCS) in a single session
 - 🐳 **Docker Ready**: Containerized deployment support
 
 ## 📋 Supported Formats
@@ -196,12 +198,39 @@ docker build -t wsi-viewer .
 docker run -p 8009:8009 -v $(pwd)/uploads:/app/uploads -v $(pwd)/cache:/app/cache wsi-viewer
 ```
 
+## 📚 Documentation
+
+- **[AUTH.md](AUTH.md)** - Authentication setup and configuration
+- **[USAGE.md](USAGE.md)** - Usage guide and examples
+- **[DOCKER.md](DOCKER.md)** - Docker deployment guide
+- **[CLOUD_RUN.md](CLOUD_RUN.md)** - Google Cloud Run deployment guide
+- **[GCS_ARCHITECTURE.md](GCS_ARCHITECTURE.md)** - GCS integration architecture
+
 ## ⚙️ Configuration
+
+### Authentication
+
+Default credentials (change in production!):
+- Username: `admin`
+- Password: `admin`
+
+Configure via environment variables:
+```bash
+export AUTH_USERNAME=your_username
+export AUTH_PASSWORD=your_password
+# Or use password hash for production
+export AUTH_PASSWORD_HASH='$2b$12$...'
+```
+
+See [AUTH.md](AUTH.md) for complete authentication guide.
+
+### Application Settings
 
 Edit `app.py` or use environment variables:
 
+- **Authentication**: `AUTH_ENABLED`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `AUTH_PASSWORD_HASH`
 - **GCS**: `GCS_SERVICE_ACCOUNT_PATH`, `GCS_BUCKET_NAME`
-- **Port**: Default 8009 (set in `app.py` or via uvicorn)
+- **Port**: Default 8511 (set in `app.py` or via uvicorn)
 - **Session TTL**: `--session-ttl` (default: 30 minutes)
 
 ## 🔧 Troubleshooting

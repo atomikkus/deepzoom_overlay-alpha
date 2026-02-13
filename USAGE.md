@@ -1,5 +1,15 @@
 # Usage Guide
 
+## Authentication
+
+The API requires authentication for creating/deleting sessions. See [AUTH.md](AUTH.md) for details.
+
+**Default credentials (development only):**
+- Username: `admin`
+- Password: `admin`
+
+⚠️ Change these in production! See [AUTH.md](AUTH.md) for secure configuration.
+
 ## Running the Server
 
 ### For GCS Files (Remote)

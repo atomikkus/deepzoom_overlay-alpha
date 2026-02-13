@@ -32,13 +32,18 @@ COPY styles.css .
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/cache
 
+# Default port (can be overridden by PORT env var)
+ENV PORT=8511
+
 # Expose the application port
-EXPOSE 8511
+EXPOSE $PORT
 
 # Health check (using Python's urllib - no extra dependencies needed)
+# Note: Health checks don't support ENV substitution, so we check multiple ports
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "from urllib.request import urlopen; urlopen('http://localhost:8511/docs', timeout=5)"
+    CMD python -c "import os; from urllib.request import urlopen; port=os.getenv('PORT', '8511'); urlopen(f'http://localhost:{port}/docs', timeout=5)"
 
 # Run the application
-# Note: Using 0.0.0.0 to bind to all interfaces (required for Docker)
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8511"]
+# Note: Using 0.0.0.0 to bind to all interfaces (required for Docker/Cloud Run)
+# The PORT environment variable is automatically set by Cloud Run
+CMD uvicorn app:app --host 0.0.0.0 --port $PORT

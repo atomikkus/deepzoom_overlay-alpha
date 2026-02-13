@@ -8,11 +8,13 @@ import os
 import argparse
 from pathlib import Path
 from typing import Optional, Tuple, List
-from datetime import datetime
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request
+from datetime import datetime, timedelta
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request, Depends, status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
+import secrets
 from session_manager import SessionManager, ALLOWED_EXTENSIONS, is_gcs_path
 
 
@@ -67,6 +69,84 @@ else:
 
 # Build list of overlay paths
 overlay_paths = args.overlay if args.overlay else []
+
+# ========================================
+# Authentication Setup
+# ========================================
+import hashlib
+
+# Use bcrypt library directly to avoid passlib's 72-byte internal test.
+# We pre-hash with SHA256 so any password length works (bcrypt has 72-byte limit).
+try:
+    import bcrypt
+    _bcrypt_available = True
+except ImportError:
+    _bcrypt_available = False
+    bcrypt = None
+
+security = HTTPBasic()
+
+def _to_bcrypt_input(password: str) -> bytes:
+    """Convert password to fixed 64 bytes for bcrypt (avoids 72-byte limit)."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest().encode("ascii")
+
+def _hash_password(plain: str) -> str:
+    """Hash password (any length) via SHA256 then bcrypt."""
+    if not _bcrypt_available:
+        raise RuntimeError("bcrypt is not installed. Install with: pip install passlib[bcrypt]")
+    return bcrypt.hashpw(_to_bcrypt_input(plain), bcrypt.gensalt()).decode("ascii")
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    """Verify password against stored hash."""
+    if not stored_hash or not _bcrypt_available:
+        return False
+    if not (stored_hash.startswith("$2") and "$" in stored_hash[2:]):
+        return False
+    try:
+        return bcrypt.checkpw(_to_bcrypt_input(password), stored_hash.encode("ascii"))
+    except (ValueError, Exception):
+        return False
+
+# Load authentication credentials from environment variables
+# Default: admin / admin (change in production!)
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
+AUTH_PASSWORD_HASH = os.getenv("AUTH_PASSWORD_HASH", None)
+
+# If no hash provided, use plain password from env (for development only)
+if AUTH_PASSWORD_HASH is None:
+    plain_password = os.getenv("AUTH_PASSWORD", "admin")
+    try:
+        AUTH_PASSWORD_HASH = _hash_password(plain_password)
+    except ValueError as e:
+        if "72 bytes" in str(e) or "truncate" in str(e).lower():
+            raise ValueError(
+                "AUTH_PASSWORD is too long. Set AUTH_PASSWORD_HASH using: python generate_password_hash.py"
+            ) from e
+        raise
+    print(f"⚠️  Using development password. Set AUTH_PASSWORD_HASH for production!")
+
+# Authentication dependency
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify username and password."""
+    username_correct = secrets.compare_digest(credentials.username, AUTH_USERNAME)
+    password_correct = _verify_password(credentials.password, AUTH_PASSWORD_HASH)
+    
+    if not (username_correct and password_correct):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+# Optional: Disable auth completely (for development)
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
+
+def get_current_user(credentials: HTTPBasicCredentials = Depends(security)):
+    """Get current authenticated user (or None if auth disabled)."""
+    if not AUTH_ENABLED:
+        return "anonymous"
+    return verify_credentials(credentials)
 
 # Initialize session manager (no cache dir needed without conversion)
 session_mgr = SessionManager(ttl_minutes=args.session_ttl)
@@ -260,8 +340,8 @@ class CreateSessionRequest(BaseModel):
 
 
 @app.post("/api/sessions")
-async def create_session(req: CreateSessionRequest):
-    """Create a new viewer session."""
+async def create_session(req: CreateSessionRequest, username: str = Depends(get_current_user)):
+    """Create a new viewer session. Requires authentication."""
     # Validate local paths
     for slide_path in req.slides:
         if not is_gcs_path(slide_path):
@@ -275,15 +355,16 @@ async def create_session(req: CreateSessionRequest):
         "url": f"/{session.token}/",
         "slide_paths": session.slide_paths,
         "overlay_paths": session.overlay_paths,
+        "created_by": username,
     }
 
 
 @app.delete("/api/sessions/{token}")
 @app.post("/api/sessions/{token}/delete")
-async def delete_session(token: str):
-    """Delete a session explicitly via API."""
+async def delete_session(token: str, username: str = Depends(get_current_user)):
+    """Delete a session explicitly via API. Requires authentication."""
     deleted = session_mgr.delete_session(token)
-    return {"deleted": deleted}
+    return {"deleted": deleted, "deleted_by": username}
 
 
 @app.post("/api/sessions/{token}/heartbeat")
@@ -835,8 +916,8 @@ async def serve_overlay_file(token: str, filename: str):
 # ========================================
 
 @app.post("/api/gcs/download")
-async def download_gcs_file(blob_path: str = Query(..., description="Path to blob in GCS bucket")):
-    """Download a file from GCS to local uploads folder."""
+async def download_gcs_file(blob_path: str = Query(..., description="Path to blob in GCS bucket"), username: str = Depends(get_current_user)):
+    """Download a file from GCS to local uploads folder. Requires authentication."""
     if not GCS_AVAILABLE:
         raise HTTPException(status_code=503, detail="GCS library not installed")
     if gcs_client is None:
@@ -1010,10 +1091,14 @@ async def startup_event():
     else:
         mode = "Local"
     
+    # Get port from environment variable (for Cloud Run compatibility)
+    port = int(os.getenv("PORT", 8511))
+    
     print("=" * 60)
     print("WSI Viewer Server - GeoTIFFTileSource Streaming")
     print("=" * 60)
     print(f"Mode: {mode}")
+    print(f"Port: {port}")
     print(f"Slide paths ({len(slide_paths)}):")
     for i, path in enumerate(slide_paths, 1):
         print(f"  {i}. {path}")
@@ -1021,11 +1106,12 @@ async def startup_event():
         print(f"Overlay paths ({len(overlay_paths)}):")
         for i, path in enumerate(overlay_paths, 1):
             print(f"  {i}. {path}")
-    print(f"Default session: http://localhost:8511/{default_session.token}/")
-    print(f"Create new sessions: POST http://localhost:8511/api/sessions")
-    print(f"API docs: http://localhost:8511/docs")
+    print(f"Default session: http://localhost:{port}/{default_session.token}/")
+    print(f"Create new sessions: POST http://localhost:{port}/api/sessions")
+    print(f"API docs: http://localhost:{port}/docs")
     print(f"Session TTL: {args.session_ttl} minutes")
     print(f"GCS Client: {'✓ Available' if gcs_client else '✗ Not available'}")
+    print(f"Auth: {'✓ Enabled' if AUTH_ENABLED else '✗ Disabled'}")
     print("=" * 60)
 
 
@@ -1037,4 +1123,6 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8511, reload=True)
+    # Read port from environment variable (for Cloud Run compatibility)
+    port = int(os.getenv("PORT", 8511))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)

@@ -27,6 +27,48 @@ docker build -t wsi-viewer .
 docker run -d -p 8511:8511 --name wsi-viewer wsi-viewer
 ```
 
+## Authentication
+
+The API requires authentication by default. See [AUTH.md](AUTH.md) for complete details.
+
+**Default credentials:**
+- Username: `admin`
+- Password: `admin`
+
+**Configure via environment variables:**
+
+```bash
+# Set custom credentials
+docker run -d \
+  -e AUTH_USERNAME=myuser \
+  -e AUTH_PASSWORD=mypassword \
+  -p 8511:8511 \
+  wsi-viewer
+```
+
+**For production, use password hash:**
+
+```bash
+# Generate hash
+python generate_password_hash.py
+
+# Use in Docker
+docker run -d \
+  -e AUTH_USERNAME=produser \
+  -e AUTH_PASSWORD_HASH='$2b$12$...' \
+  -p 8511:8511 \
+  wsi-viewer
+```
+
+**Disable authentication (development only):**
+
+```bash
+docker run -d \
+  -e AUTH_ENABLED=false \
+  -p 8511:8511 \
+  wsi-viewer
+```
+
 ## Configuration Options
 
 ### 1. Local Files
@@ -111,6 +153,10 @@ docker run -d \
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `AUTH_ENABLED` | Enable/disable authentication | `true` |
+| `AUTH_USERNAME` | API username | `admin` |
+| `AUTH_PASSWORD` | API password (dev only) | `admin` |
+| `AUTH_PASSWORD_HASH` | API password hash (production) | None |
 | `GCS_SERVICE_ACCOUNT_PATH` | Path to GCS service account JSON | None |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google Cloud credentials path | None |
 | `SESSION_TTL` | Session timeout in minutes | 30 |
