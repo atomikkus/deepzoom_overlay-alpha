@@ -1,7 +1,7 @@
 """
 Session Manager for WSI Viewer
 Manages multiple viewer sessions with UUID tokens, each with its own
-slides directory, overlay directory, and converter instance.
+slides directory and overlay directory.
 """
 
 import uuid
@@ -10,13 +10,23 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional, Dict
-from converter import WSIConverter
 
 
 ALLOWED_EXTENSIONS = {
     'svs', 'tif', 'tiff', 'vms', 'vmu', 'ndpi',
     'scn', 'mrxs', 'svslide', 'bif'
 }
+
+
+def is_gcs_path(path: str) -> bool:
+    """Return True if a path points to GCS-style location."""
+    p = (path or "").strip().lower()
+    return (
+        p.startswith("gs://")
+        or p.startswith("gcs://")
+        or p.startswith("https://storage.googleapis.com/")
+        or p.startswith("https://storage.cloud.google.com/")
+    )
 
 
 @dataclass
@@ -26,8 +36,6 @@ class Session:
     slides_dir: str
     overlay_dir: Optional[str]
     single_slide: Optional[str]
-    converter: WSIConverter
-    cache_dir: str
     last_accessed: datetime = field(default_factory=datetime.utcnow)
     created_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -50,9 +58,8 @@ class Session:
 class SessionManager:
     """Manages multiple viewer sessions with TTL-based expiration."""
 
-    def __init__(self, default_cache_dir: str = "cache", ttl_minutes: int = 30):
+    def __init__(self, ttl_minutes: int = 30):
         self.sessions: Dict[str, Session] = {}
-        self.default_cache_dir = default_cache_dir
         self.ttl_minutes = ttl_minutes
         self._cleanup_task: Optional[asyncio.Task] = None
 
@@ -61,12 +68,24 @@ class SessionManager:
 
         # Support both directory and single-file paths
         single_slide = None
-        if Path(slides_path).is_file():
-            resolved = Path(slides_path).resolve()
-            slides_dir = str(resolved.parent)
-            single_slide = resolved.name
+        gcs_source = is_gcs_path(slides_path)
+        if gcs_source:
+            normalized = slides_path.strip().rstrip("/")
+            filename = normalized.rsplit("/", 1)[-1] if "/" in normalized else normalized
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+            if ext in ALLOWED_EXTENSIONS and "/" in normalized:
+                slides_dir = normalized.rsplit("/", 1)[0]
+                single_slide = filename
+            else:
+                slides_dir = normalized
         else:
-            slides_dir = str(Path(slides_path).resolve())
+            if Path(slides_path).is_file():
+                resolved = Path(slides_path).resolve()
+                slides_dir = str(resolved.parent)
+                single_slide = resolved.name
+            else:
+                slides_dir = str(Path(slides_path).resolve())
 
         # Validate overlay dir
         resolved_overlay = None
@@ -75,15 +94,11 @@ class SessionManager:
             if p.is_dir():
                 resolved_overlay = str(p.resolve())
 
-        converter = WSIConverter(upload_dir=slides_dir, cache_dir=self.default_cache_dir)
-
         session = Session(
             token=token,
             slides_dir=slides_dir,
             overlay_dir=resolved_overlay,
             single_slide=single_slide,
-            converter=converter,
-            cache_dir=self.default_cache_dir,
         )
         self.sessions[token] = session
 

@@ -40,26 +40,15 @@
                 </div>
             </div>
 
-            <!-- Slide Info -->
-            <div class="sidebar-section" id="info-section" style="display: none;">
-                <h2 class="section-title">Slide Information</h2>
-                <div class="info-content" id="info-content"></div>
-                <div class="info-actions"
-                    style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
-                    <!-- Cancer Density Controls -->
-                    <div id="density-controls">
-                        <button class="btn-primary" id="toggle-density-btn" onclick="toggleDensityOverlay()"
-                            style="width: 100%;">
-                            Show Cancer Density
-                        </button>
-                        <div id="density-slider-container" style="display: none; margin-top: 0.5rem;">
-                            <label for="density-opacity" style="font-size: 0.875rem; color: var(--text-muted);">
-                                Opacity: <span id="density-opacity-value">60</span>%
-                            </label>
-                            <input type="range" id="density-opacity" min="10" max="100" value="60"
-                                style="width: 100%; margin-top: 0.25rem;" oninput="updateDensityOpacity(this.value)">
-                        </div>
-                    </div>
+            <!-- Density Opacity Control (Global) -->
+            <div class="sidebar-section" id="density-opacity-section" style="display: none;">
+                <h2 class="section-title">Density Overlay</h2>
+                <div style="padding: 0 0.5rem;">
+                    <label for="density-opacity" style="font-size: 0.875rem; color: var(--text-muted);">
+                        Opacity: <span id="density-opacity-value">60</span>%
+                    </label>
+                    <input type="range" id="density-opacity" min="10" max="100" value="60"
+                        style="width: 100%; margin-top: 0.25rem;" oninput="updateDensityOpacity(this.value)">
                 </div>
             </div>
         </aside>
@@ -82,6 +71,13 @@
                 </button>
                 <button class="control-btn" id="fullscreen-btn" title="Fullscreen">
                     <span class="control-icon">⛶</span>
+                </button>
+                <div class="control-separator"></div>
+                <button class="control-btn" id="draw-polygon-btn" title="Draw Polygon">
+                    <span class="control-icon">📐</span>
+                </button>
+                <button class="control-btn" id="clear-polygons-btn" title="Clear All Polygons">
+                    <span class="control-icon">🗑️</span>
                 </button>
             </div>
 

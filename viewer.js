@@ -12,6 +12,13 @@ let densityOverlayEnabled = false;
 let densityGridData = null;
 let densityMetadata = null;
 
+// Polygon drawing state
+let drawingMode = false;
+let currentPolygon = [];
+let polygons = [];
+let polygonOverlays = [];
+let polygonSvgOverlay = null;
+
 
 // API base URL - derived from the session token in the URL path
 // e.g., if URL is /a8f3k2x9/, API_BASE becomes /a8f3k2x9
@@ -77,6 +84,13 @@ function initializeEventListeners() {
     if (fullscreenBtn) fullscreenBtn.addEventListener('click', () => {
         if (viewer) viewer.setFullScreen(!viewer.isFullPage());
     });
+
+    // Polygon drawing controls
+    const drawPolygonBtn = document.getElementById('draw-polygon-btn');
+    if (drawPolygonBtn) drawPolygonBtn.addEventListener('click', toggleDrawingMode);
+
+    const clearPolygonsBtn = document.getElementById('clear-polygons-btn');
+    if (clearPolygonsBtn) clearPolygonsBtn.addEventListener('click', clearAllPolygons);
 }
 
 // ========================================
@@ -113,14 +127,29 @@ function renderSlidesList() {
     }
 
     slidesList.innerHTML = slides.map(slide => `
-        <div class="slide-item ${currentSlide === slide.name ? 'active' : ''}" 
-             onclick="loadSlide('${slide.name}')">
-            <div class="slide-name">${slide.name}</div>
-            <div class="slide-status ${slide.converted ? 'converted' : 'viewable'}">
-                ${slide.converted ? '✓ Converted' : '👁 Ready'}
+        <div class="slide-item ${currentSlide === slide.name ? 'active' : ''}">
+            <div class="slide-item-main" onclick="loadSlide('${slide.name}')">
+                <div class="slide-name">${slide.name}</div>
+                <div class="slide-status">
+                    ${slide.viewable ? 'Ready to view' : 'Loading...'}
+                </div>
             </div>
+            <button class="density-toggle-btn" 
+                    id="density-btn-${slide.name}" 
+                    onclick="event.stopPropagation(); toggleDensityOverlay('${slide.name}')"
+                    style="display: flex;"
+                    title="Toggle Tumor Cell Annotation overlay">
+                TCA
+            </button>
         </div>
     `).join('');
+    
+    console.log(`Rendered ${slides.length} slides, checking overlay availability...`);
+    
+    // After rendering, check which slides have overlays
+    slides.forEach(slide => {
+        setTimeout(() => checkDensityOverlayAvailability(slide.name), 100);
+    });
 }
 
 async function convertSlide(slideName) {
@@ -145,31 +174,11 @@ async function convertSlide(slideName) {
 async function loadSlide(slideName) {
     try {
         currentSlide = slideName;
-
-        // Find slide object to get filename
-        const slide = slides.find(s => s.name === slideName);
-        if (!slide) throw new Error('Slide not found in list');
-
-        // Get slide info
-        const infoResponse = await fetch(`${API_BASE}/api/info/${slideName}`);
-        if (!infoResponse.ok) throw new Error('Failed to load slide info');
-
-        const slideInfo = await infoResponse.json();
-
-        // Display slide info
-        displaySlideInfo(slideInfo);
-
-        // Use dynamic DZI for all slides - this works for both converted and unconverted slides
-        // because the backend handles on-the-fly tiling
-        console.log('Using dynamic DZI source for instant viewing');
-        const dziUrl = `${API_BASE}/api/dynamic_dzi/${slideName}.dzi`;
-        loadInViewer(dziUrl, 'dzi');
-
-        // Update slides list
-        renderSlidesList();
-
-
-
+        
+        // Clear any existing overlay pages
+        const existingOverlays = document.querySelectorAll('.slide-overlay-container');
+        existingOverlays.forEach(el => el.remove());
+        
         // Reset density overlay state
         if (densityOverlayImage) {
             viewer.world.removeItem(densityOverlayImage);
@@ -177,9 +186,31 @@ async function loadSlide(slideName) {
         }
         densityOverlayEnabled = false;
         densityGridData = null;
-        const densityBtn = document.getElementById('toggle-density-btn');
-        if (densityBtn) {
-            densityBtn.textContent = 'Show Cancer Density';
+        window._overlayConfig = null;
+        window._overlayGridUrl = null;
+        
+        // Hide opacity slider
+        const opacitySection = document.getElementById('density-opacity-section');
+        if (opacitySection) opacitySection.style.display = 'none';
+
+        // Find slide object to get filename
+        const slide = slides.find(s => s.name === slideName);
+        if (!slide) throw new Error('Slide not found in list');
+
+        // Use GeoTIFFTileSource for all SVS/TIFF files (works for both local and GCS with range requests)
+        console.log('Loading with GeoTIFFTileSource (range requests)');
+        const rawSlideUrl = `${API_BASE}/api/raw_slides/${slide.filename}`;
+        loadInViewer(rawSlideUrl, 'geotiff');
+
+        // Update slides list
+        renderSlidesList();
+        
+        // Load overlay config for current slide
+        await loadOverlayConfigForSlide(slideName);
+        
+        // Update polygon overlays for current slide
+        if (polygonSvgOverlay) {
+            updatePolygonOverlay();
         }
 
         showToast(`Loaded: ${slideName}`, 'success');
@@ -231,15 +262,30 @@ async function loadInViewer(sourceUrl, type) {
             // Test URL accessibility first
             try {
                 const testResponse = await fetch(absoluteUrl, {
-                    method: 'HEAD',
-                    headers: {
-                        'Range': 'bytes=0-1023'
-                    }
+                    method: 'HEAD'
                 });
-                console.log('URL test response status:', testResponse.status);
-                console.log('URL test response headers:', Object.fromEntries(testResponse.headers.entries()));
+                console.log('HEAD test status:', testResponse.status);
+                console.log('HEAD headers:', Object.fromEntries(testResponse.headers.entries()));
+                
+                if (!testResponse.ok) {
+                    throw new Error(`HEAD request failed with status ${testResponse.status}`);
+                }
+                
+                const acceptRanges = testResponse.headers.get('accept-ranges');
+                const contentLength = testResponse.headers.get('content-length');
+                console.log('Accept-Ranges:', acceptRanges);
+                console.log('Content-Length:', contentLength);
+                
+                if (!acceptRanges || acceptRanges === 'none') {
+                    console.warn('Server does not support range requests!');
+                }
+                
+                if (!contentLength || contentLength === '0') {
+                    throw new Error('File size is 0 or unknown');
+                }
             } catch (testError) {
-                console.warn('URL accessibility test failed (may be OK):', testError);
+                console.error('URL accessibility test FAILED:', testError);
+                throw new Error(`Cannot access file: ${testError.message}`);
             }
 
             // Use getAllTileSources static method as per documentation
@@ -266,22 +312,45 @@ async function loadInViewer(sourceUrl, type) {
             if (!tileSources || (Array.isArray(tileSources) && tileSources.length === 0)) {
                 throw new Error('GeoTIFFTileSource returned empty or invalid tile sources');
             }
+            
+            // Handle multiple pages (SVS files often have main slide + label + macro)
+            if (Array.isArray(tileSources) && tileSources.length > 1) {
+                console.log(`Found ${tileSources.length} pages in the slide`);
+                
+                // Sort by size (largest first)
+                const sortedSources = tileSources.map((ts, idx) => ({
+                    source: ts,
+                    index: idx,
+                    width: ts.width || 0,
+                    height: ts.height || 0,
+                    area: (ts.width || 0) * (ts.height || 0)
+                })).sort((a, b) => b.area - a.area);
+                
+                console.log('Sorted pages by size:', sortedSources.map(s => ({
+                    index: s.index,
+                    width: s.width,
+                    height: s.height,
+                    area: s.area
+                })));
+                
+                // Use the largest as main tile source
+                tileSources = sortedSources[0].source;
+                
+                // Store smaller images for overlay display
+                window._additionalPages = sortedSources.slice(1).map(s => s.source);
+                console.log(`Main image: ${sortedSources[0].width}x${sortedSources[0].height}`);
+                console.log(`Additional pages: ${window._additionalPages.length}`);
+            } else {
+                window._additionalPages = null;
+            }
         } catch (e) {
             console.error('Failed to create GeoTIFFTileSource:', e);
             console.error('Error name:', e.name);
             console.error('Error message:', e.message);
             console.error('Error stack:', e.stack);
 
-            // Check if it's a GCS file
-            const isGCSFile = sourceUrl.includes('storage.googleapis.com') || sourceUrl.includes('storage.cloud.google.com');
-
-            if (isGCSFile) {
-                showToast(`Failed to load GCS file: ${e.message}. The file may require CORS configuration or the signed URL may have expired.`, 'error');
-            } else {
-                console.warn('GeoTIFF direct viewing failed, attempting fallback to DZI...');
-                showToast('Direct viewing failed, falling back to converted tiles...', 'warning');
-                loadDziFallback();
-            }
+            showToast(`Failed to load slide: ${e.message}. Check console for details.`, 'error');
+            showViewerPlaceholder();
             return;
         }
     }
@@ -315,9 +384,15 @@ async function loadInViewer(sourceUrl, type) {
                 showToast('Viewing directly from raw file (GeoTIFF)', 'success');
             }
 
-            // Try to load density overlay for this slide
-            if (currentSlide) {
-                loadDensityOverlay(currentSlide);
+            // Add additional pages (label, macro) as overlays
+            if (window._additionalPages && window._additionalPages.length > 0) {
+                console.log('Adding additional pages as overlays...');
+                displayAdditionalPages(window._additionalPages);
+            }
+
+            // Try to load density overlay for current slide if config available
+            if (currentSlide && window._overlayConfig) {
+                loadDensityOverlay(window._overlayConfig);
             }
         });
 
@@ -333,36 +408,15 @@ async function loadInViewer(sourceUrl, type) {
                 errorMessage = event.userData.error;
             }
 
-            if (type === 'geotiff') {
-                console.log('GeoTIFF open failed:', errorMessage);
-                // For GCS files, we can't fallback to DZI since they're not converted
-                const isGCSFile = sourceUrl.includes('storage.googleapis.com') || sourceUrl.includes('storage.cloud.google.com');
-                if (isGCSFile) {
-                    showToast(`Failed to load GCS file: ${errorMessage}. Check CORS settings or try downloading the file first.`, 'error');
-                } else {
-                    console.log('GeoTIFF open failed, attempting fallback to DZI');
-                    showToast('Direct view failed, falling back to converted tiles...', 'warning');
-                    loadDziFallback();
-                }
-            } else {
-                showToast(`Failed to open slide: ${errorMessage}`, 'error');
-                showViewerPlaceholder();
-            }
+            console.log('Viewer open failed:', errorMessage);
+            showToast(`Failed to open slide: ${errorMessage}. Check console for details.`, 'error');
+            showViewerPlaceholder();
         });
 
     } catch (error) {
         console.error('Error creating viewer:', error);
-        if (type === 'geotiff') {
-            loadDziFallback();
-        }
-    }
-}
-
-function loadDziFallback() {
-    if (currentSlide) {
-        const dziUrl = `${API_BASE}/api/dzi/${currentSlide}.dzi`;
-        console.log('Falling back to DZI:', dziUrl);
-        loadInViewer(dziUrl, 'dzi');
+        showToast(`Error creating viewer: ${error.message}`, 'error');
+        showViewerPlaceholder();
     }
 }
 
@@ -382,56 +436,157 @@ function showViewerPlaceholder() {
 
 
 // ========================================
-// Display Slide Info
+// Additional Pages (Label, Macro) Display
 // ========================================
 
-function displaySlideInfo(info) {
-    const infoSection = document.getElementById('info-section');
-    const infoContent = document.getElementById('info-content');
-
-    const [width, height] = info.dimensions;
-    const props = info.properties;
-
-    let html = `
-        <div class="info-row">
-            <span class="info-label">Dimensions</span>
-            <span class="info-value">${width.toLocaleString()} × ${height.toLocaleString()}</span>
-        </div>
-        <div class="info-row">
-            <span class="info-label">Levels</span>
-            <span class="info-value">${info.level_count}</span>
-        </div>
-    `;
-
-    if (props['openslide.vendor']) {
-        html += `
-            <div class="info-row">
-                <span class="info-label">Vendor</span>
-                <span class="info-value">${props['openslide.vendor']}</span>
-            </div>
+function displayAdditionalPages(pages) {
+    // Remove any existing overlays
+    const existingOverlays = document.querySelectorAll('.slide-overlay-container');
+    existingOverlays.forEach(el => el.remove());
+    
+    // Display up to 2 additional pages (label and macro)
+    pages.slice(0, 2).forEach((page, idx) => {
+        const width = page.width || 1000;
+        const height = page.height || 1000;
+        const aspectRatio = width / height;
+        
+        // Determine dimensions maintaining aspect ratio
+        let overlayWidth = 200;
+        let overlayHeight = Math.round(overlayWidth / aspectRatio);
+        
+        // Limit height
+        if (overlayHeight > 150) {
+            overlayHeight = 150;
+            overlayWidth = Math.round(overlayHeight * aspectRatio);
+        }
+        
+        const overlayDiv = document.createElement('div');
+        overlayDiv.className = 'slide-overlay-container';
+        overlayDiv.id = `slide-overlay-${idx}`;
+        overlayDiv.style.cssText = `
+            top: ${10 + (idx * (overlayHeight + 20))}px;
+            left: 10px;
+            width: ${overlayWidth}px;
+            height: ${overlayHeight}px;
         `;
-    }
-
-    if (props['openslide.objective-power']) {
-        html += `
-            <div class="info-row">
-                <span class="info-label">Magnification</span>
-                <span class="info-value">${props['openslide.objective-power']}×</span>
-            </div>
+        
+        const label = document.createElement('div');
+        label.className = 'slide-overlay-label';
+        label.textContent = idx === 0 ? 'Label' : 'Macro';
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'slide-overlay-close';
+        closeBtn.innerHTML = '×';
+        closeBtn.title = 'Close';
+        closeBtn.onclick = () => overlayDiv.remove();
+        
+        const viewerDiv = document.createElement('div');
+        viewerDiv.id = `overlay-viewer-${idx}`;
+        viewerDiv.style.cssText = `
+            width: 100%;
+            height: 100%;
         `;
-    }
+        
+        overlayDiv.appendChild(label);
+        overlayDiv.appendChild(closeBtn);
+        overlayDiv.appendChild(viewerDiv);
+        document.getElementById('viewer-container').appendChild(overlayDiv);
+        
+        // Create mini viewer for this page
+        try {
+            const miniViewer = OpenSeadragon({
+                id: `overlay-viewer-${idx}`,
+                tileSources: page,
+                showNavigationControl: false,
+                showNavigator: false,
+                animationTime: 0.3,
+                blendTime: 0.1,
+                constrainDuringPan: true,
+                visibilityRatio: 1,
+                minZoomLevel: 0.5,
+                maxZoomLevel: 5,
+                zoomPerClick: 1.5,
+                zoomPerScroll: 1.3,
+                crossOriginPolicy: 'Anonymous',
+                ajaxWithCredentials: false
+            });
+            
+            miniViewer.addHandler('open', () => {
+                console.log(`Overlay viewer ${idx} (${label.textContent}) opened: ${width}x${height}`);
+            });
+            
+        } catch (e) {
+            console.error(`Failed to create overlay viewer ${idx}:`, e);
+            overlayDiv.remove();
+        }
+    });
+}
 
-    if (props['openslide.mpp-x'] && props['openslide.mpp-y']) {
-        html += `
-            <div class="info-row">
-                <span class="info-label">Resolution</span>
-                <span class="info-value">${parseFloat(props['openslide.mpp-x']).toFixed(3)} μm/px</span>
-            </div>
-        `;
-    }
 
-    infoContent.innerHTML = html;
-    infoSection.style.display = 'block';
+// ========================================
+// Check Density Overlay Availability
+// ========================================
+
+async function checkDensityOverlayAvailability(slideName) {
+    console.log(`Checking overlay availability for: ${slideName}`);
+    
+    try {
+        const url = `${API_BASE}/api/overlay-config/${slideName}`;
+        console.log(`Fetching: ${url}`);
+        
+        const configResponse = await fetch(url);
+        console.log(`Response status: ${configResponse.status}`);
+        
+        const config = configResponse.ok ? await configResponse.json() : null;
+        console.log(`Config for ${slideName}:`, config);
+        
+        const densityBtn = document.getElementById(`density-btn-${slideName}`);
+        if (!densityBtn) {
+            console.warn(`Button not found for ${slideName}`);
+            return;
+        }
+        
+        if (config && config.available) {
+            densityBtn.style.display = 'flex';
+            densityBtn.disabled = false;
+            console.log(`✅ TCA overlay available for ${slideName} - button shown`);
+        } else {
+            densityBtn.style.display = 'none';
+            console.log(`❌ No overlay for ${slideName} - button hidden`);
+        }
+    } catch (error) {
+        console.error(`Error checking overlay for ${slideName}:`, error);
+        const densityBtn = document.getElementById(`density-btn-${slideName}`);
+        if (densityBtn) densityBtn.style.display = 'none';
+    }
+}
+
+async function loadOverlayConfigForSlide(slideName) {
+    try {
+        const configResponse = await fetch(`${API_BASE}/api/overlay-config/${slideName}`);
+        if (!configResponse.ok) {
+            console.log('No overlay config available for current slide');
+            window._overlayConfig = null;
+            return;
+        }
+
+        const config = await configResponse.json();
+        if (config.available) {
+            window._overlayConfig = config;
+            console.log('Overlay config loaded for current slide');
+            
+            // Show the button for this slide
+            const densityBtn = document.getElementById(`density-btn-${slideName}`);
+            if (densityBtn) {
+                densityBtn.style.display = 'flex';
+            }
+        } else {
+            window._overlayConfig = null;
+        }
+    } catch (error) {
+        console.log('Could not load overlay config:', error.message);
+        window._overlayConfig = null;
+    }
 }
 
 // ========================================
@@ -457,23 +612,10 @@ function showToast(message, type = 'info') {
 // Density Overlay Management
 // ========================================
 
-async function loadDensityOverlay(slideName) {
-    if (!viewer) return;
+async function loadDensityOverlay(config) {
+    if (!viewer || !config || !config.available) return;
 
     try {
-        // Fetch per-slide overlay configuration from backend
-        const configResponse = await fetch(`${API_BASE}/api/overlay-config/${slideName}`);
-        if (!configResponse.ok) {
-            console.log('No overlay config available for this slide');
-            return;
-        }
-
-        const config = await configResponse.json();
-        if (!config.available) {
-            console.log('Overlay files not available for this slide');
-            return;
-        }
-
         // Store the grid URL for later use in toggleDensityOverlay
         window._overlayGridUrl = config.grid;
 
@@ -543,8 +685,17 @@ async function loadDensityOverlay(slideName) {
     }
 }
 
-async function toggleDensityOverlay() {
+async function toggleDensityOverlay(slideName) {
     if (!viewer) return;
+    
+    // If no slideName provided, use current slide
+    if (!slideName) slideName = currentSlide;
+    if (!slideName) return;
+
+    // Load overlay if not loaded yet
+    if (!densityOverlayImage && window._overlayConfig) {
+        await loadDensityOverlay(window._overlayConfig);
+    }
 
     // Fallback: If densityOverlayImage is null, try to find it in the world
     if (!densityOverlayImage) {
@@ -565,18 +716,21 @@ async function toggleDensityOverlay() {
     }
 
     densityOverlayEnabled = !densityOverlayEnabled;
-    const btn = document.getElementById('toggle-density-btn');
-
-    const sliderContainer = document.getElementById('density-slider-container');
+    const btn = document.getElementById(`density-btn-${slideName}`);
+    const opacitySection = document.getElementById('density-opacity-section');
     const opacitySlider = document.getElementById('density-opacity');
 
     if (densityOverlayEnabled) {
         // Show the overlay with current slider value
         const opacity = opacitySlider ? parseInt(opacitySlider.value) / 100 : 0.6;
         densityOverlayImage.setOpacity(opacity);
-        btn.textContent = 'Hide Cancer Density';
-        btn.classList.add('active');
-        if (sliderContainer) sliderContainer.style.display = 'block';
+        
+        if (btn) {
+            btn.classList.add('active');
+            btn.title = 'Hide Tumor Cell Annotation overlay';
+        }
+        
+        if (opacitySection) opacitySection.style.display = 'block';
 
         // Load grid data for interactive clicks if not already loaded
         if (!densityGridData) {
@@ -602,14 +756,18 @@ async function toggleDensityOverlay() {
             }
         }
 
-        showToast('Cancer density overlay enabled', 'success');
+        showToast('Tumor Cell Annotation overlay enabled', 'success');
     } else {
-        // Hide the overlay and slider
+        // Hide the overlay
         densityOverlayImage.setOpacity(0);
-        btn.textContent = 'Show Cancer Density';
-        btn.classList.remove('active');
-        if (sliderContainer) sliderContainer.style.display = 'none';
-        showToast('Cancer density overlay disabled', 'info');
+        
+        if (btn) {
+            btn.classList.remove('active');
+            btn.title = 'Show Tumor Cell Annotation overlay';
+        }
+        
+        if (opacitySection) opacitySection.style.display = 'none';
+        showToast('Tumor Cell Annotation overlay disabled', 'info');
     }
 }
 
@@ -656,3 +814,261 @@ function formatFileSize(bytes) {
 
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }
+
+// ========================================
+// Polygon Drawing Functions
+// ========================================
+
+function toggleDrawingMode() {
+    if (!viewer) {
+        showToast('Please load a slide first', 'error');
+        return;
+    }
+
+    drawingMode = !drawingMode;
+    const btn = document.getElementById('draw-polygon-btn');
+
+    if (drawingMode) {
+        btn.classList.add('active');
+        btn.title = 'Click to finish polygon (or ESC to cancel)';
+        showToast('Drawing mode: Click to add points, double-click to finish', 'info');
+        
+        // Initialize SVG overlay if not exists
+        if (!polygonSvgOverlay) {
+            initializePolygonOverlay();
+        }
+        
+        // Start new polygon
+        currentPolygon = [];
+        
+        // Add click handler
+        viewer.addHandler('canvas-click', handlePolygonClick);
+        viewer.addHandler('canvas-double-click', finishPolygon);
+        
+        // Change cursor
+        document.getElementById('viewer-container').style.cursor = 'crosshair';
+    } else {
+        btn.classList.remove('active');
+        btn.title = 'Draw Polygon';
+        
+        // Remove handlers
+        viewer.removeHandler('canvas-click', handlePolygonClick);
+        viewer.removeHandler('canvas-double-click', finishPolygon);
+        
+        // Reset cursor
+        document.getElementById('viewer-container').style.cursor = 'default';
+        
+        // Cancel current polygon if any
+        if (currentPolygon.length > 0) {
+            currentPolygon = [];
+            updatePolygonOverlay();
+        }
+        
+        showToast('Drawing mode disabled', 'info');
+    }
+}
+
+function initializePolygonOverlay() {
+    // Create SVG overlay element
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("id", "polygon-overlay");
+    svg.style.position = "absolute";
+    svg.style.top = "0";
+    svg.style.left = "0";
+    svg.style.width = "100%";
+    svg.style.height = "100%";
+    svg.style.pointerEvents = "none";
+    svg.style.zIndex = "1000";
+
+    // Create group for polygons
+    const g = document.createElementNS(svgNS, "g");
+    g.setAttribute("id", "polygons-group");
+    svg.appendChild(g);
+
+    // Add to viewer
+    const viewerElement = document.getElementById('viewer-container');
+    viewerElement.appendChild(svg);
+    
+    polygonSvgOverlay = svg;
+
+    // Update overlay on viewport change
+    viewer.addHandler('animation', updatePolygonOverlay);
+    viewer.addHandler('resize', updatePolygonOverlay);
+}
+
+function handlePolygonClick(event) {
+    if (!drawingMode) return;
+
+    // Prevent OpenSeadragon from handling this click
+    event.preventDefaultAction = true;
+
+    // Get viewport coordinates
+    const viewportPoint = viewer.viewport.pointFromPixel(event.position);
+    
+    // Add point to current polygon
+    currentPolygon.push({
+        x: viewportPoint.x,
+        y: viewportPoint.y
+    });
+
+    console.log(`Added point ${currentPolygon.length}:`, viewportPoint);
+    
+    // Update visual feedback
+    updatePolygonOverlay();
+    
+    // Show point count
+    if (currentPolygon.length === 1) {
+        showToast('First point added. Continue adding points.', 'success');
+    } else if (currentPolygon.length === 2) {
+        showToast(`${currentPolygon.length} points. Double-click to finish.`, 'info');
+    } else {
+        showToast(`${currentPolygon.length} points`, 'info');
+    }
+}
+
+function finishPolygon(event) {
+    if (!drawingMode || currentPolygon.length < 3) {
+        return;
+    }
+
+    // Prevent default
+    event.preventDefaultAction = true;
+
+    // Save polygon
+    const polygon = {
+        id: Date.now(),
+        points: [...currentPolygon],
+        timestamp: new Date().toISOString(),
+        slide: currentSlide
+    };
+
+    polygons.push(polygon);
+    console.log('Polygon saved:', polygon);
+
+    // Reset current polygon
+    currentPolygon = [];
+    
+    // Update display
+    updatePolygonOverlay();
+    
+    showToast(`Polygon saved (${polygon.points.length} points)`, 'success');
+
+    // Exit drawing mode
+    toggleDrawingMode();
+}
+
+function updatePolygonOverlay() {
+    if (!polygonSvgOverlay) return;
+
+    const g = polygonSvgOverlay.querySelector('#polygons-group');
+    if (!g) return;
+
+    // Clear existing polygons
+    g.innerHTML = '';
+
+    const svgNS = "http://www.w3.org/2000/svg";
+
+    // Draw saved polygons for current slide
+    const slidePolygons = polygons.filter(p => p.slide === currentSlide);
+    slidePolygons.forEach((polygon, index) => {
+        const polygonElement = createPolygonSvgElement(polygon.points, index);
+        if (polygonElement) g.appendChild(polygonElement);
+    });
+
+    // Draw current polygon being drawn
+    if (currentPolygon.length > 0) {
+        const currentPolyElement = createPolygonSvgElement(currentPolygon, -1, true);
+        if (currentPolyElement) g.appendChild(currentPolyElement);
+    }
+}
+
+function createPolygonSvgElement(points, index, isCurrent = false) {
+    if (points.length === 0) return null;
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const g = document.createElementNS(svgNS, "g");
+
+    // Convert viewport coordinates to pixel coordinates
+    const pixelPoints = points.map(p => {
+        const pixel = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(p.x, p.y));
+        return { x: pixel.x, y: pixel.y };
+    });
+
+    // Create polygon path
+    if (pixelPoints.length >= 2) {
+        const path = document.createElementNS(svgNS, "path");
+        
+        let d = `M ${pixelPoints[0].x} ${pixelPoints[0].y}`;
+        for (let i = 1; i < pixelPoints.length; i++) {
+            d += ` L ${pixelPoints[i].x} ${pixelPoints[i].y}`;
+        }
+        
+        // Close polygon if not current
+        if (!isCurrent && pixelPoints.length >= 3) {
+            d += ' Z';
+        }
+        
+        path.setAttribute('d', d);
+        path.setAttribute('fill', isCurrent ? 'rgba(255, 255, 0, 0.2)' : 'rgba(0, 150, 255, 0.2)');
+        path.setAttribute('stroke', isCurrent ? '#ffff00' : '#0096ff');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('stroke-dasharray', isCurrent ? '5,5' : 'none');
+        
+        g.appendChild(path);
+    }
+
+    // Draw points
+    pixelPoints.forEach((point, i) => {
+        const circle = document.createElementNS(svgNS, "circle");
+        circle.setAttribute('cx', point.x);
+        circle.setAttribute('cy', point.y);
+        circle.setAttribute('r', '4');
+        circle.setAttribute('fill', isCurrent ? '#ffff00' : '#0096ff');
+        circle.setAttribute('stroke', 'white');
+        circle.setAttribute('stroke-width', '1');
+        g.appendChild(circle);
+
+        // Add point number label
+        if (!isCurrent) {
+            const text = document.createElementNS(svgNS, "text");
+            text.setAttribute('x', point.x + 8);
+            text.setAttribute('y', point.y - 8);
+            text.setAttribute('fill', 'white');
+            text.setAttribute('font-size', '12px');
+            text.setAttribute('font-weight', 'bold');
+            text.setAttribute('stroke', 'black');
+            text.setAttribute('stroke-width', '0.5');
+            text.textContent = i + 1;
+            g.appendChild(text);
+        }
+    });
+
+    return g;
+}
+
+function clearAllPolygons() {
+    if (polygons.length === 0) {
+        showToast('No polygons to clear', 'info');
+        return;
+    }
+
+    const count = polygons.length;
+    polygons = [];
+    currentPolygon = [];
+    
+    updatePolygonOverlay();
+    
+    showToast(`Cleared ${count} polygon${count !== 1 ? 's' : ''}`, 'success');
+}
+
+// Add keyboard shortcuts for polygon drawing
+document.addEventListener('keydown', (event) => {
+    if (drawingMode && event.key === 'Escape') {
+        // Cancel current polygon
+        currentPolygon = [];
+        updatePolygonOverlay();
+        toggleDrawingMode();
+        showToast('Polygon drawing cancelled', 'info');
+    }
+});

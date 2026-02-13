@@ -400,9 +400,11 @@ body {
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
-    padding: var(--spacing-md);
-    cursor: pointer;
+    padding: var(--spacing-sm);
     transition: all var(--transition-base);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .slide-item:hover {
@@ -415,6 +417,12 @@ body {
     background: rgba(79, 70, 229, 0.08);
     border-color: var(--accent-primary);
     box-shadow: var(--shadow-glow);
+}
+
+.slide-item-main {
+    flex: 1;
+    cursor: pointer;
+    padding: var(--spacing-xs);
 }
 
 .slide-name {
@@ -430,6 +438,44 @@ body {
     display: flex;
     align-items: center;
     gap: 0.25rem;
+}
+
+.density-toggle-btn {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 0.25rem 0.625rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all var(--transition-base);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    min-width: 45px;
+}
+
+.density-toggle-btn:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.density-toggle-btn.active {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: white;
+    box-shadow: var(--shadow-glow);
+}
+
+.density-toggle-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 .slide-status.converted {
@@ -529,6 +575,19 @@ body {
 
 .control-btn:active {
     transform: translateY(0);
+}
+
+.control-btn.active {
+    background: var(--accent-primary);
+    color: white;
+    border-color: var(--accent-primary);
+}
+
+.control-separator {
+    width: 1px;
+    height: 40px;
+    background: var(--border-color);
+    margin: 0 8px;
 }
 
 .viewer-container {
@@ -665,4 +724,64 @@ body {
         height: 40px;
         font-size: 1rem;
     }
+}
+
+/* ========================================
+   Slide Overlays (Label, Macro)
+   ======================================== */
+
+.slide-overlay-container {
+    position: absolute;
+    background: white;
+    border: 2px solid var(--border-color);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+    transition: transform 0.2s ease;
+}
+
+.slide-overlay-container:hover {
+    transform: scale(1.02);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+
+.slide-overlay-label {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(135deg, var(--accent-color), var(--accent-hover));
+    color: white;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+    z-index: 1001;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.slide-overlay-close {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 20px;
+    height: 20px;
+    background: rgba(0, 0, 0, 0.7);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    z-index: 1002;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.2s ease;
+}
+
+.slide-overlay-close:hover {
+    background: rgba(255, 0, 0, 0.8);
 }
