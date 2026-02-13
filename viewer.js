@@ -14,10 +14,16 @@ let densityMetadata = null;
 
 // Polygon drawing state
 let drawingMode = false;
+let deleteMode = false;
+let labelMode = false;
 let currentPolygon = [];
 let polygons = [];
 let polygonOverlays = [];
 let polygonSvgOverlay = null;
+
+// Free-floating labels (independent of polygons)
+let labels = [];
+let labelSvgOverlay = null;
 
 
 // API base URL - derived from the session token in the URL path
@@ -85,9 +91,19 @@ function initializeEventListeners() {
         if (viewer) viewer.setFullScreen(!viewer.isFullPage());
     });
 
+    // Snapshot button
+    const snapshotBtn = document.getElementById('snapshot-btn');
+    if (snapshotBtn) snapshotBtn.addEventListener('click', takeSnapshot);
+
     // Polygon drawing controls
     const drawPolygonBtn = document.getElementById('draw-polygon-btn');
     if (drawPolygonBtn) drawPolygonBtn.addEventListener('click', toggleDrawingMode);
+
+    const labelPolygonBtn = document.getElementById('label-polygon-btn');
+    if (labelPolygonBtn) labelPolygonBtn.addEventListener('click', toggleLabelMode);
+
+    const deletePolygonBtn = document.getElementById('delete-polygon-btn');
+    if (deletePolygonBtn) deletePolygonBtn.addEventListener('click', toggleDeleteMode);
 
     const clearPolygonsBtn = document.getElementById('clear-polygons-btn');
     if (clearPolygonsBtn) clearPolygonsBtn.addEventListener('click', clearAllPolygons);
@@ -208,12 +224,15 @@ async function loadSlide(slideName) {
         // Load overlay config for current slide
         await loadOverlayConfigForSlide(slideName);
         
-        // Update polygon overlays for current slide
+        // Update polygon and label overlays for current slide
         if (polygonSvgOverlay) {
             updatePolygonOverlay();
         }
+        if (labelSvgOverlay) {
+            updateLabelOverlay();
+        }
 
-        showToast(`Loaded: ${slideName}`, 'success');
+        showToast('Slide loaded', 'success');
 
     } catch (error) {
         console.error('Load slide error:', error);
@@ -349,7 +368,7 @@ async function loadInViewer(sourceUrl, type) {
             console.error('Error message:', e.message);
             console.error('Error stack:', e.stack);
 
-            showToast(`Failed to load slide: ${e.message}. Check console for details.`, 'error');
+            showToast(`Failed to load slide: ${e.message}`, 'error');
             showViewerPlaceholder();
             return;
         }
@@ -379,10 +398,6 @@ async function loadInViewer(sourceUrl, type) {
         // Add event handlers
         viewer.addHandler('open', () => {
             console.log('Viewer opened successfully');
-            // If we successfully opened a GeoTIFF, show a success message
-            if (type === 'geotiff') {
-                showToast('Viewing directly from raw file (GeoTIFF)', 'success');
-            }
 
             // Add additional pages (label, macro) as overlays
             if (window._additionalPages && window._additionalPages.length > 0) {
@@ -409,7 +424,7 @@ async function loadInViewer(sourceUrl, type) {
             }
 
             console.log('Viewer open failed:', errorMessage);
-            showToast(`Failed to open slide: ${errorMessage}. Check console for details.`, 'error');
+            showToast(`Failed to open slide: ${errorMessage}`, 'error');
             showViewerPlaceholder();
         });
 
@@ -711,7 +726,7 @@ async function toggleDensityOverlay(slideName) {
     }
 
     if (!densityOverlayImage) {
-        showToast('No density overlay available for this slide', 'info');
+        // No overlay available - silent, no need to notify user
         return;
     }
 
@@ -756,7 +771,7 @@ async function toggleDensityOverlay(slideName) {
             }
         }
 
-        showToast('Tumor Cell Annotation overlay enabled', 'success');
+        showToast('Overlay enabled', 'success');
     } else {
         // Hide the overlay
         densityOverlayImage.setOpacity(0);
@@ -767,7 +782,7 @@ async function toggleDensityOverlay(slideName) {
         }
         
         if (opacitySection) opacitySection.style.display = 'none';
-        showToast('Tumor Cell Annotation overlay disabled', 'info');
+        showToast('Overlay disabled', 'info');
     }
 }
 
@@ -825,13 +840,18 @@ function toggleDrawingMode() {
         return;
     }
 
+    // Can't be in multiple modes at once
+    if (deleteMode) toggleDeleteMode();
+    if (labelMode) toggleLabelMode();
+
     drawingMode = !drawingMode;
     const btn = document.getElementById('draw-polygon-btn');
 
     if (drawingMode) {
+        // Entering drawing mode
         btn.classList.add('active');
-        btn.title = 'Click to finish polygon (or ESC to cancel)';
-        showToast('Drawing mode: Click to add points, double-click to finish', 'info');
+        btn.title = 'Click to finish drawing';
+        showToast('Drawing mode: Click to add points', 'info');
         
         // Initialize SVG overlay if not exists
         if (!polygonSvgOverlay) {
@@ -848,6 +868,7 @@ function toggleDrawingMode() {
         // Change cursor
         document.getElementById('viewer-container').style.cursor = 'crosshair';
     } else {
+        // Exiting drawing mode
         btn.classList.remove('active');
         btn.title = 'Draw Polygon';
         
@@ -858,13 +879,27 @@ function toggleDrawingMode() {
         // Reset cursor
         document.getElementById('viewer-container').style.cursor = 'default';
         
-        // Cancel current polygon if any
-        if (currentPolygon.length > 0) {
+        // If we have a polygon with 3+ points, save it without label
+        if (currentPolygon.length >= 3) {
+            const polygon = {
+                id: Date.now(),
+                points: [...currentPolygon],
+                timestamp: new Date().toISOString(),
+                slide: currentSlide,
+                label: ''
+            };
+
+            polygons.push(polygon);
+            showToast('Polygon saved', 'success');
             currentPolygon = [];
-            updatePolygonOverlay();
+        } else if (currentPolygon.length > 0) {
+            showToast('Incomplete polygon discarded', 'info');
+            currentPolygon = [];
+        } else {
+            showToast('Drawing mode disabled', 'info');
         }
         
-        showToast('Drawing mode disabled', 'info');
+        updatePolygonOverlay();
     }
 }
 
@@ -878,7 +913,7 @@ function initializePolygonOverlay() {
     svg.style.left = "0";
     svg.style.width = "100%";
     svg.style.height = "100%";
-    svg.style.pointerEvents = "none";
+    svg.style.pointerEvents = "none"; // SVG doesn't capture clicks
     svg.style.zIndex = "1000";
 
     // Create group for polygons
@@ -916,15 +951,6 @@ function handlePolygonClick(event) {
     
     // Update visual feedback
     updatePolygonOverlay();
-    
-    // Show point count
-    if (currentPolygon.length === 1) {
-        showToast('First point added. Continue adding points.', 'success');
-    } else if (currentPolygon.length === 2) {
-        showToast(`${currentPolygon.length} points. Double-click to finish.`, 'info');
-    } else {
-        showToast(`${currentPolygon.length} points`, 'info');
-    }
 }
 
 function finishPolygon(event) {
@@ -935,27 +961,26 @@ function finishPolygon(event) {
     // Prevent default
     event.preventDefaultAction = true;
 
-    // Save polygon
+    // Save polygon without label
     const polygon = {
         id: Date.now(),
         points: [...currentPolygon],
         timestamp: new Date().toISOString(),
-        slide: currentSlide
+        slide: currentSlide,
+        label: ''
     };
 
     polygons.push(polygon);
-    console.log('Polygon saved:', polygon);
-
+    
     // Reset current polygon
     currentPolygon = [];
     
     // Update display
     updatePolygonOverlay();
     
-    showToast(`Polygon saved (${polygon.points.length} points)`, 'success');
+    showToast('Polygon saved', 'success');
 
-    // Exit drawing mode
-    toggleDrawingMode();
+    // Stay in drawing mode so user can draw more polygons
 }
 
 function updatePolygonOverlay() {
@@ -972,7 +997,7 @@ function updatePolygonOverlay() {
     // Draw saved polygons for current slide
     const slidePolygons = polygons.filter(p => p.slide === currentSlide);
     slidePolygons.forEach((polygon, index) => {
-        const polygonElement = createPolygonSvgElement(polygon.points, index);
+        const polygonElement = createPolygonSvgElement(polygon.points, index, false, polygon.label);
         if (polygonElement) g.appendChild(polygonElement);
     });
 
@@ -983,7 +1008,7 @@ function updatePolygonOverlay() {
     }
 }
 
-function createPolygonSvgElement(points, index, isCurrent = false) {
+function createPolygonSvgElement(points, index, isCurrent = false, label = '') {
     if (points.length === 0) return null;
 
     const svgNS = "http://www.w3.org/2000/svg";
@@ -1010,10 +1035,27 @@ function createPolygonSvgElement(points, index, isCurrent = false) {
         }
         
         path.setAttribute('d', d);
-        path.setAttribute('fill', isCurrent ? 'rgba(255, 255, 0, 0.2)' : 'rgba(0, 150, 255, 0.2)');
-        path.setAttribute('stroke', isCurrent ? '#ffff00' : '#0096ff');
+        
+        // Different colors based on mode
+        let fill, stroke, strokeDash;
+        if (isCurrent) {
+            fill = 'rgba(255, 255, 0, 0.2)';
+            stroke = '#ffff00';
+            strokeDash = '5,5';
+        } else if (deleteMode) {
+            fill = 'rgba(255, 0, 0, 0.3)'; // Red tint in delete mode
+            stroke = '#ff0000';
+            strokeDash = 'none';
+        } else {
+            fill = 'rgba(0, 150, 255, 0.2)';
+            stroke = '#0096ff';
+            strokeDash = 'none';
+        }
+        
+        path.setAttribute('fill', fill);
+        path.setAttribute('stroke', stroke);
         path.setAttribute('stroke-width', '2');
-        path.setAttribute('stroke-dasharray', isCurrent ? '5,5' : 'none');
+        path.setAttribute('stroke-dasharray', strokeDash);
         
         g.appendChild(path);
     }
@@ -1024,51 +1066,690 @@ function createPolygonSvgElement(points, index, isCurrent = false) {
         circle.setAttribute('cx', point.x);
         circle.setAttribute('cy', point.y);
         circle.setAttribute('r', '4');
-        circle.setAttribute('fill', isCurrent ? '#ffff00' : '#0096ff');
+        
+        let pointColor;
+        if (isCurrent) {
+            pointColor = '#ffff00';
+        } else if (deleteMode) {
+            pointColor = '#ff0000';
+        } else {
+            pointColor = '#0096ff';
+        }
+        
+        circle.setAttribute('fill', pointColor);
         circle.setAttribute('stroke', 'white');
         circle.setAttribute('stroke-width', '1');
         g.appendChild(circle);
-
-        // Add point number label
-        if (!isCurrent) {
-            const text = document.createElementNS(svgNS, "text");
-            text.setAttribute('x', point.x + 8);
-            text.setAttribute('y', point.y - 8);
-            text.setAttribute('fill', 'white');
-            text.setAttribute('font-size', '12px');
-            text.setAttribute('font-weight', 'bold');
-            text.setAttribute('stroke', 'black');
-            text.setAttribute('stroke-width', '0.5');
-            text.textContent = i + 1;
-            g.appendChild(text);
-        }
     });
+
+    // Add label if provided (for saved polygons)
+    if (!isCurrent && label) {
+        // Calculate centroid for label placement
+        const centroid = calculateCentroid(pixelPoints);
+        
+        // Create background rectangle for label
+        const labelBg = document.createElementNS(svgNS, "rect");
+        const labelText = document.createElementNS(svgNS, "text");
+        
+        // Set text first to measure it
+        labelText.setAttribute('x', centroid.x);
+        labelText.setAttribute('y', centroid.y);
+        labelText.setAttribute('text-anchor', 'middle');
+        labelText.setAttribute('dominant-baseline', 'middle');
+        labelText.setAttribute('fill', 'white');
+        labelText.setAttribute('font-size', '14px');
+        labelText.setAttribute('font-weight', 'bold');
+        labelText.textContent = label;
+        
+        // Approximate text width (more accurate would require rendering)
+        const textWidth = label.length * 8.5;
+        const textHeight = 18;
+        
+        labelBg.setAttribute('x', centroid.x - textWidth / 2 - 4);
+        labelBg.setAttribute('y', centroid.y - textHeight / 2 - 2);
+        labelBg.setAttribute('width', textWidth + 8);
+        labelBg.setAttribute('height', textHeight + 4);
+        
+        let labelBgColor;
+        if (deleteMode) {
+            labelBgColor = 'rgba(255, 0, 0, 0.9)'; // Red in delete mode
+        } else {
+            labelBgColor = 'rgba(0, 96, 255, 0.9)'; // Blue in normal mode
+        }
+        
+        labelBg.setAttribute('fill', labelBgColor);
+        labelBg.setAttribute('rx', '4');
+        labelBg.setAttribute('ry', '4');
+        labelBg.setAttribute('stroke', 'white');
+        labelBg.setAttribute('stroke-width', '2');
+        
+        g.appendChild(labelBg);
+        g.appendChild(labelText);
+    }
 
     return g;
 }
 
-function clearAllPolygons() {
-    if (polygons.length === 0) {
-        showToast('No polygons to clear', 'info');
+function calculateCentroid(points) {
+    let sumX = 0, sumY = 0;
+    points.forEach(p => {
+        sumX += p.x;
+        sumY += p.y;
+    });
+    return {
+        x: sumX / points.length,
+        y: sumY / points.length
+    };
+}
+
+function toggleLabelMode() {
+    if (!viewer) {
+        showToast('Please load a slide first', 'error');
         return;
     }
 
-    const count = polygons.length;
-    polygons = [];
-    currentPolygon = [];
-    
-    updatePolygonOverlay();
-    
-    showToast(`Cleared ${count} polygon${count !== 1 ? 's' : ''}`, 'success');
+    // Can't be in multiple modes at once
+    if (drawingMode) toggleDrawingMode();
+    if (deleteMode) toggleDeleteMode();
+
+    labelMode = !labelMode;
+    const btn = document.getElementById('label-polygon-btn');
+
+    if (labelMode) {
+        btn.classList.add('active');
+        btn.title = 'Exit label mode';
+        showToast('Label mode: Click to place label', 'info');
+        
+        // Initialize label overlay if not exists
+        if (!labelSvgOverlay) {
+            initializeLabelOverlay();
+        }
+        
+        // Add click handler
+        viewer.addHandler('canvas-click', handlePlaceLabelClick);
+        
+        // Change cursor
+        document.getElementById('viewer-container').style.cursor = 'text';
+    } else {
+        btn.classList.remove('active');
+        btn.title = 'Add Labels';
+        
+        // Remove handler
+        viewer.removeHandler('canvas-click', handlePlaceLabelClick);
+        
+        // Reset cursor
+        document.getElementById('viewer-container').style.cursor = 'default';
+        
+        showToast('Label mode disabled', 'info');
+    }
 }
 
-// Add keyboard shortcuts for polygon drawing
-document.addEventListener('keydown', (event) => {
-    if (drawingMode && event.key === 'Escape') {
-        // Cancel current polygon
-        currentPolygon = [];
+function toggleDeleteMode() {
+    if (!viewer) {
+        showToast('Please load a slide first', 'error');
+        return;
+    }
+
+    // Can't be in multiple modes at once
+    if (drawingMode) toggleDrawingMode();
+    if (labelMode) toggleLabelMode();
+
+    deleteMode = !deleteMode;
+    const btn = document.getElementById('delete-polygon-btn');
+
+    if (deleteMode) {
+        btn.classList.add('active');
+        btn.title = 'Exit delete mode';
+        showToast('Delete mode: Click item to delete', 'info');
+        
+        // Add click handler
+        viewer.addHandler('canvas-click', handleDeletePolygonClick);
+        
+        // Change cursor
+        document.getElementById('viewer-container').style.cursor = 'pointer';
+        
+        // Make polygons more visible for deletion
         updatePolygonOverlay();
-        toggleDrawingMode();
-        showToast('Polygon drawing cancelled', 'info');
+    } else {
+        btn.classList.remove('active');
+        btn.title = 'Delete Items';
+        
+        // Remove handler
+        viewer.removeHandler('canvas-click', handleDeletePolygonClick);
+        
+        // Reset cursor
+        document.getElementById('viewer-container').style.cursor = 'default';
+        
+        updatePolygonOverlay();
+        
+        showToast('Delete mode disabled', 'info');
+    }
+}
+
+function handlePlaceLabelClick(event) {
+    if (!labelMode) return;
+
+    event.preventDefaultAction = true;
+
+    const viewportPoint = viewer.viewport.pointFromPixel(event.position);
+    
+    // Use setTimeout to ensure prompt appears
+    setTimeout(() => {
+        // Prompt for label text
+        const labelText = window.prompt('Enter label text:');
+        
+        if (labelText && labelText.trim()) {
+            const text = labelText.trim();
+            
+            // Create new label at clicked position
+            // Position will be calculated dynamically on each render
+            const label = {
+                id: Date.now(),
+                text: text,
+                position: { x: viewportPoint.x, y: viewportPoint.y },
+                slide: currentSlide,
+                timestamp: new Date().toISOString()
+            };
+            
+            labels.push(label);
+            
+            updateLabelOverlay();
+            showToast('Label added', 'success');
+        }
+    }, 100);
+}
+
+function handleDeletePolygonClick(event) {
+    if (!deleteMode) return;
+
+    event.preventDefaultAction = true;
+
+    const viewportPoint = viewer.viewport.pointFromPixel(event.position);
+    const pixel = viewer.viewport.pixelFromPoint(viewportPoint);
+    
+    // Check if clicked on a label first (labels are on top)
+    const slideLabels = labels.filter(l => l.slide === currentSlide);
+    
+    // Recalculate label positions at current zoom level
+    const labelPositions = calculateAllLabelPositions(slideLabels);
+    
+    for (let i = slideLabels.length - 1; i >= 0; i--) {
+        const label = slideLabels[i];
+        const anchorPixel = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(label.position.x, label.position.y));
+        
+        // Use dynamically calculated offset
+        const offset = labelPositions[i];
+        const labelPixel = {
+            x: anchorPixel.x + offset.x,
+            y: anchorPixel.y + offset.y
+        };
+        
+        // Check if click is near anchor point (small circle)
+        const distToAnchor = Math.sqrt(
+            Math.pow(pixel.x - anchorPixel.x, 2) + 
+            Math.pow(pixel.y - anchorPixel.y, 2)
+        );
+        
+        // Check if click is within label box
+        const textWidth = label.text.length * 9.5;
+        const textHeight = 20;
+        const padding = 8;
+        
+        const inLabelBox = (
+            pixel.x >= labelPixel.x - textWidth / 2 - padding &&
+            pixel.x <= labelPixel.x + textWidth / 2 + padding &&
+            pixel.y >= labelPixel.y - textHeight / 2 - padding / 2 &&
+            pixel.y <= labelPixel.y + textHeight / 2 + padding / 2
+        );
+        
+        if (distToAnchor <= 10 || inLabelBox) {
+            const confirmed = confirm(`Delete label "${label.text}"?`);
+            
+            if (confirmed) {
+                const globalIndex = labels.indexOf(label);
+                if (globalIndex > -1) {
+                    labels.splice(globalIndex, 1);
+                }
+                
+                updateLabelOverlay();
+                showToast('Label deleted', 'success');
+            }
+            return;
+        }
+    }
+    
+    // Check if clicked on a polygon
+    const slidePolygons = polygons.filter(p => p.slide === currentSlide);
+    
+    for (let i = slidePolygons.length - 1; i >= 0; i--) {
+        const polygon = slidePolygons[i];
+        if (isPointInPolygon(viewportPoint, polygon.points)) {
+            // Found the clicked polygon
+            const polygonLabel = polygon.label ? ` "${polygon.label}"` : '';
+            const confirmed = confirm(`Delete polygon${polygonLabel}?`);
+            
+            if (confirmed) {
+                // Remove from global polygons array
+                const globalIndex = polygons.indexOf(polygon);
+                if (globalIndex > -1) {
+                    polygons.splice(globalIndex, 1);
+                }
+                
+                updatePolygonOverlay();
+                showToast('Polygon deleted', 'success');
+            }
+            return;
+        }
+    }
+    
+    // User already in delete mode, no need for redundant message
+}
+
+function isPointInPolygon(point, polygonPoints) {
+    // Ray casting algorithm
+    let inside = false;
+    const x = point.x;
+    const y = point.y;
+    
+    for (let i = 0, j = polygonPoints.length - 1; i < polygonPoints.length; j = i++) {
+        const xi = polygonPoints[i].x;
+        const yi = polygonPoints[i].y;
+        const xj = polygonPoints[j].x;
+        const yj = polygonPoints[j].y;
+        
+        const intersect = ((yi > y) !== (yj > y)) &&
+                         (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    
+    return inside;
+}
+
+function clearAllPolygons() {
+    // Clear all polygons and labels for all slides
+    const totalCount = polygons.length + labels.length;
+    
+    if (totalCount === 0) {
+        showToast('No annotations to clear', 'info');
+        return;
+    }
+
+    const confirmed = confirm(`Delete all ${polygons.length} polygon${polygons.length !== 1 ? 's' : ''} and ${labels.length} label${labels.length !== 1 ? 's' : ''}?`);
+    if (!confirmed) return;
+
+    polygons = [];
+    currentPolygon = [];
+    labels = [];
+    
+    updatePolygonOverlay();
+    updateLabelOverlay();
+    
+    showToast('All annotations cleared', 'success');
+}
+
+// ========================================
+// Label Functions
+// ========================================
+
+function initializeLabelOverlay() {
+    // Create SVG overlay element for labels
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("id", "label-overlay");
+    svg.style.position = "absolute";
+    svg.style.top = "0";
+    svg.style.left = "0";
+    svg.style.width = "100%";
+    svg.style.height = "100%";
+    svg.style.pointerEvents = "none";
+    svg.style.zIndex = "1001"; // Above polygons
+    
+    // Create group for labels
+    const g = document.createElementNS(svgNS, "g");
+    g.setAttribute("id", "labels-group");
+    svg.appendChild(g);
+    
+    // Add to viewer
+    const viewerElement = document.getElementById('viewer-container');
+    viewerElement.appendChild(svg);
+    
+    labelSvgOverlay = svg;
+    
+    // Update overlay on viewport change
+    viewer.addHandler('animation', updateLabelOverlay);
+    viewer.addHandler('resize', updateLabelOverlay);
+}
+
+function updateLabelOverlay() {
+    if (!labelSvgOverlay) return;
+    
+    const g = labelSvgOverlay.querySelector('#labels-group');
+    if (!g) return;
+    
+    // Clear existing labels
+    g.innerHTML = '';
+    
+    const svgNS = "http://www.w3.org/2000/svg";
+    
+    // Draw labels for current slide with dynamic collision avoidance
+    const slideLabels = labels.filter(l => l.slide === currentSlide);
+    
+    // Recalculate all label positions to avoid overlaps at current zoom
+    const labelPositions = calculateAllLabelPositions(slideLabels);
+    
+    slideLabels.forEach((label, index) => {
+        const labelElement = createLabelSvgElement(label, labelPositions[index]);
+        if (labelElement) g.appendChild(labelElement);
+    });
+}
+
+function calculateAllLabelPositions(slideLabels) {
+    const positions = [];
+    
+    for (let i = 0; i < slideLabels.length; i++) {
+        const label = slideLabels[i];
+        const anchorPixel = viewer.viewport.pixelFromPoint(
+            new OpenSeadragon.Point(label.position.x, label.position.y)
+        );
+        
+        // Try different offset positions
+        const offsetOptions = [
+            { x: 40, y: -40 },   // Top-right (default)
+            { x: 60, y: -40 },   // Further right
+            { x: 40, y: -60 },   // Higher up
+            { x: 60, y: -60 },   // Further right and higher
+            { x: -40, y: -40 },  // Top-left
+            { x: 40, y: 40 },    // Bottom-right
+            { x: -40, y: 40 },   // Bottom-left
+            { x: 80, y: -40 },   // Far right
+            { x: 40, y: -80 },   // Far up
+            { x: 80, y: -80 },   // Far diagonal
+            { x: -60, y: -60 },  // Far top-left
+            { x: -80, y: -40 },  // Far left
+            { x: 100, y: -40 },  // Very far right
+            { x: 40, y: -100 },  // Very far up
+        ];
+        
+        let bestOffset = offsetOptions[0];
+        
+        // Check against all previously positioned labels
+        for (const offset of offsetOptions) {
+            const newBounds = getLabelBounds(anchorPixel, label.text, offset.x, offset.y);
+            let hasOverlap = false;
+            
+            for (let j = 0; j < i; j++) {
+                const existingLabel = slideLabels[j];
+                const existingPosition = positions[j];
+                const existingAnchorPixel = viewer.viewport.pixelFromPoint(
+                    new OpenSeadragon.Point(existingLabel.position.x, existingLabel.position.y)
+                );
+                const existingBounds = getLabelBounds(
+                    existingAnchorPixel,
+                    existingLabel.text,
+                    existingPosition.x,
+                    existingPosition.y
+                );
+                
+                if (boundsOverlap(newBounds, existingBounds)) {
+                    hasOverlap = true;
+                    break;
+                }
+            }
+            
+            if (!hasOverlap) {
+                bestOffset = offset;
+                break;
+            }
+        }
+        
+        positions.push(bestOffset);
+    }
+    
+    return positions;
+}
+
+function getLabelBounds(anchorPixel, text, offsetX, offsetY) {
+    const textWidth = text.length * 9.5;
+    const textHeight = 20;
+    const padding = 8;
+    
+    const labelPixel = {
+        x: anchorPixel.x + offsetX,
+        y: anchorPixel.y + offsetY
+    };
+    
+    return {
+        left: labelPixel.x - textWidth / 2 - padding,
+        right: labelPixel.x + textWidth / 2 + padding,
+        top: labelPixel.y - textHeight / 2 - padding / 2,
+        bottom: labelPixel.y + textHeight / 2 + padding / 2,
+        labelPixel: labelPixel
+    };
+}
+
+function boundsOverlap(bounds1, bounds2) {
+    // Add a small margin for spacing
+    const margin = 10;
+    return !(
+        bounds1.right + margin < bounds2.left ||
+        bounds1.left - margin > bounds2.right ||
+        bounds1.bottom + margin < bounds2.top ||
+        bounds1.top - margin > bounds2.bottom
+    );
+}
+
+
+function createLabelSvgElement(label, offset) {
+    const svgNS = "http://www.w3.org/2000/svg";
+    const g = document.createElementNS(svgNS, "g");
+    
+    // Convert viewport coordinates to pixel coordinates (anchor point)
+    const anchorPixel = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(label.position.x, label.position.y));
+    
+    // Use provided offset (dynamically calculated) or default
+    const useOffset = offset || { x: 40, y: -40 };
+    const labelPixel = {
+        x: anchorPixel.x + useOffset.x,
+        y: anchorPixel.y + useOffset.y
+    };
+    
+    // Approximate text dimensions
+    const textWidth = label.text.length * 9.5;
+    const textHeight = 20;
+    const padding = 8;
+    
+    // Draw leader line from anchor to label
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute('x1', anchorPixel.x);
+    line.setAttribute('y1', anchorPixel.y);
+    line.setAttribute('x2', labelPixel.x - textWidth / 2 - padding);
+    line.setAttribute('y2', labelPixel.y);
+    line.setAttribute('stroke', 'black');
+    line.setAttribute('stroke-width', '2');
+    g.appendChild(line);
+    
+    // Draw anchor point (small circle)
+    const anchor = document.createElementNS(svgNS, "circle");
+    anchor.setAttribute('cx', anchorPixel.x);
+    anchor.setAttribute('cy', anchorPixel.y);
+    anchor.setAttribute('r', '4');
+    anchor.setAttribute('fill', 'black');
+    anchor.setAttribute('stroke', 'white');
+    anchor.setAttribute('stroke-width', '2');
+    g.appendChild(anchor);
+    
+    // Draw label background
+    const bg = document.createElementNS(svgNS, "rect");
+    bg.setAttribute('x', labelPixel.x - textWidth / 2 - padding);
+    bg.setAttribute('y', labelPixel.y - textHeight / 2 - padding / 2);
+    bg.setAttribute('width', textWidth + padding * 2);
+    bg.setAttribute('height', textHeight + padding);
+    bg.setAttribute('fill', 'white');
+    bg.setAttribute('rx', '4');
+    bg.setAttribute('ry', '4');
+    bg.setAttribute('stroke', 'black');
+    bg.setAttribute('stroke-width', '2');
+    g.appendChild(bg);
+    
+    // Draw text
+    const text = document.createElementNS(svgNS, "text");
+    text.setAttribute('x', labelPixel.x);
+    text.setAttribute('y', labelPixel.y);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('dominant-baseline', 'middle');
+    text.setAttribute('fill', 'black');
+    text.setAttribute('font-size', '14px');
+    text.setAttribute('font-weight', '600');
+    text.textContent = label.text;
+    g.appendChild(text);
+    
+    return g;
+}
+
+// ========================================
+// Snapshot Functions
+// ========================================
+
+async function takeSnapshot() {
+    if (!viewer) {
+        showToast('No viewer loaded', 'error');
+        return;
+    }
+
+    try {
+        // Capturing snapshot (no need to show toast, it's fast)
+
+        // Get the viewer container
+        const viewerContainer = document.getElementById('viewer-container');
+        const canvas = viewerContainer.querySelector('canvas');
+        
+        if (!canvas) {
+            showToast('No canvas found', 'error');
+            return;
+        }
+
+        // Create a new canvas for the snapshot
+        const snapshotCanvas = document.createElement('canvas');
+        const ctx = snapshotCanvas.getContext('2d');
+        
+        // Set canvas size to match viewer
+        snapshotCanvas.width = canvas.width;
+        snapshotCanvas.height = canvas.height;
+
+        // Draw the OpenSeadragon canvas
+        ctx.drawImage(canvas, 0, 0);
+
+        // Draw SVG overlays on top
+        await drawSvgOverlaysOnCanvas(ctx, snapshotCanvas.width, snapshotCanvas.height);
+
+        // Convert to blob and download
+        snapshotCanvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const filename = `${currentSlide || 'slide'}_snapshot_${timestamp}.png`;
+            
+            link.href = url;
+            link.download = filename;
+            link.click();
+            
+            URL.revokeObjectURL(url);
+            showToast('Snapshot saved', 'success');
+        }, 'image/png');
+
+    } catch (error) {
+        console.error('Snapshot error:', error);
+        showToast('Snapshot failed', 'error');
+    }
+}
+
+async function drawSvgOverlaysOnCanvas(ctx, width, height) {
+    // Draw density overlay if present (it's rendered as part of OpenSeadragon, so it should already be in the canvas)
+    // But we can add additional slide overlays (label/macro images)
+    const additionalOverlays = document.querySelectorAll('.slide-overlay-container');
+    if (additionalOverlays.length > 0) {
+        for (const overlay of additionalOverlays) {
+            try {
+                const overlayCanvas = overlay.querySelector('canvas');
+                if (overlayCanvas && overlay.style.display !== 'none') {
+                    // Get overlay position and size
+                    const rect = overlay.getBoundingClientRect();
+                    const viewerRect = document.getElementById('viewer-container').getBoundingClientRect();
+                    
+                    // Calculate relative position
+                    const x = rect.left - viewerRect.left;
+                    const y = rect.top - viewerRect.top;
+                    
+                    // Draw the overlay canvas
+                    ctx.drawImage(overlayCanvas, x, y, rect.width, rect.height);
+                }
+            } catch (e) {
+                console.warn('Failed to draw additional overlay:', e);
+            }
+        }
+    }
+    
+    // Get all SVG overlays
+    const polygonSvg = document.getElementById('polygon-overlay');
+    const labelSvg = document.getElementById('label-overlay');
+    
+    // Draw polygons
+    if (polygonSvg) {
+        await drawSvgToCanvas(polygonSvg, ctx, width, height);
+    }
+    
+    // Draw labels
+    if (labelSvg) {
+        await drawSvgToCanvas(labelSvg, ctx, width, height);
+    }
+}
+
+function drawSvgToCanvas(svgElement, ctx, width, height) {
+    return new Promise((resolve, reject) => {
+        try {
+            // Clone the SVG to avoid modifying the original
+            const svgClone = svgElement.cloneNode(true);
+            svgClone.setAttribute('width', width);
+            svgClone.setAttribute('height', height);
+            
+            // Serialize SVG to string
+            const svgString = new XMLSerializer().serializeToString(svgClone);
+            const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+            const svgUrl = URL.createObjectURL(svgBlob);
+            
+            // Create an image from the SVG
+            const img = new Image();
+            img.onload = () => {
+                ctx.drawImage(img, 0, 0);
+                URL.revokeObjectURL(svgUrl);
+                resolve();
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(svgUrl);
+                reject(new Error('Failed to load SVG as image'));
+            };
+            img.src = svgUrl;
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+// Add keyboard shortcuts for polygon modes
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+        if (drawingMode) {
+            // Cancel current polygon
+            currentPolygon = [];
+            updatePolygonOverlay();
+            toggleDrawingMode();
+            showToast('Polygon drawing cancelled', 'info');
+        } else if (labelMode) {
+            // Exit label mode
+            toggleLabelMode();
+        } else if (deleteMode) {
+            // Exit delete mode
+            toggleDeleteMode();
+        }
     }
 });

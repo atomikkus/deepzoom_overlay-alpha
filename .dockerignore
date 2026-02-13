@@ -1,12 +1,61 @@
+# Python
 __pycache__/
 *.py[cod]
-*.log
-cache/
-uploads/
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 venv/
 .venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
 .git/
 .gitignore
-.DS_Store
-*.swp
+.gitattributes
 
+# Project specific
+cache/
+uploads/
+overlays/
+test_dir*/
+*.log
+
+# Documentation (optional - keep for reference in image)
+# *.md
+# DOCKER.md
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# Temporary files
+*.tmp
+*.bak
+.cache/

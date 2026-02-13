@@ -7,7 +7,7 @@ Each session has its own slides directory, overlay, and converter.
 import os
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -42,12 +42,12 @@ app.add_middleware(
 
 # Parse CLI arguments
 parser = argparse.ArgumentParser(description="WSI Viewer Server")
-parser.add_argument("--slides", type=str, default=None,
-                    help="GCS path (gs://bucket/path or https://storage.googleapis.com/...)")
-parser.add_argument("--slides-local", type=str, default=None,
-                    help="Local path to WSI slides directory or single slide file")
-parser.add_argument("--overlay", type=str, default=None,
-                    help="Path to overlay files directory")
+parser.add_argument("--slides", type=str, nargs='*', default=None,
+                    help="One or more GCS paths (gs://bucket/path or https://storage.googleapis.com/...)")
+parser.add_argument("--slides-local", type=str, nargs='*', default=None,
+                    help="One or more local paths to slides")
+parser.add_argument("--overlay", type=str, nargs='*', default=None,
+                    help="One or more overlay directories (searched in order)")
 parser.add_argument("--session-ttl", type=int, default=30,
                     help="Session TTL in minutes (default: 30)")
 args, unknown = parser.parse_known_args()
@@ -55,11 +55,18 @@ args, unknown = parser.parse_known_args()
 # Determine which slides source to use
 if args.slides and args.slides_local:
     raise ValueError("Cannot specify both --slides and --slides-local")
-if not args.slides and not args.slides_local:
-    args.slides_local = "uploads"  # Default to local uploads
 
-# Set the active slides path
-slides_path = args.slides if args.slides else args.slides_local
+# Build list of slide paths
+slide_paths = []
+if args.slides:
+    slide_paths.extend(args.slides)
+elif args.slides_local:
+    slide_paths.extend(args.slides_local)
+else:
+    slide_paths = ["uploads"]  # Default to local uploads
+
+# Build list of overlay paths
+overlay_paths = args.overlay if args.overlay else []
 
 # Initialize session manager (no cache dir needed without conversion)
 session_mgr = SessionManager(ttl_minutes=args.session_ttl)
@@ -98,6 +105,53 @@ def get_session_or_404(token: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     return session
+
+
+def find_file_in_session(session, filename: str):
+    """Find a file across all slide paths in the session.
+    Returns: tuple of (is_gcs, location_info)
+    - For GCS: (True, (bucket_name, blob_path, blob))
+    - For local: (False, file_path)
+    Raises HTTPException if not found.
+    """
+    for slide_path in session.slide_paths:
+        if is_gcs_path(slide_path):
+            # Try GCS
+            try:
+                bucket_name, prefix = parse_gcs_location(slide_path)
+                bucket = gcs_client.bucket(bucket_name)
+                
+                # Check if slide_path is a single file
+                if prefix and "." in prefix.rsplit("/", 1)[-1]:
+                    # Single file path
+                    file_name = Path(prefix).name
+                    if file_name == filename:
+                        blob = bucket.blob(prefix)
+                        if blob.exists():
+                            return True, (bucket_name, prefix, blob)
+                else:
+                    # Directory path
+                    blob_path = join_blob_path(prefix, filename)
+                    blob = bucket.blob(blob_path)
+                    if blob.exists():
+                        return True, (bucket_name, blob_path, blob)
+            except Exception as e:
+                print(f"Error checking GCS path {slide_path}: {e}")
+                continue
+        else:
+            # Try local path
+            p = Path(slide_path)
+            if p.is_file():
+                # Single file
+                if p.name == filename:
+                    return False, p
+            else:
+                # Directory
+                file_path = p / filename
+                if file_path.exists():
+                    return False, file_path
+    
+    raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
 
 def parse_gcs_location(path: str) -> Tuple[str, str]:
@@ -201,24 +255,26 @@ def allowed_file(filename: str) -> bool:
 # ========================================
 
 class CreateSessionRequest(BaseModel):
-    slides: str
-    overlay: Optional[str] = None
+    slides: List[str]  # List of slide paths (GCS or local)
+    overlay: Optional[List[str]] = None  # List of overlay directories
 
 
 @app.post("/api/sessions")
 async def create_session(req: CreateSessionRequest):
     """Create a new viewer session."""
-    # Allow both local paths and GCS URLs
-    if not is_gcs_path(req.slides):
-        if not Path(req.slides).exists():
-            raise HTTPException(status_code=400, detail=f"Path not found: {req.slides}")
-    session = session_mgr.create_session(req.slides, req.overlay)
+    # Validate local paths
+    for slide_path in req.slides:
+        if not is_gcs_path(slide_path):
+            if not Path(slide_path).exists():
+                raise HTTPException(status_code=400, detail=f"Path not found: {slide_path}")
+    
+    overlay_paths = req.overlay if req.overlay else []
+    session = session_mgr.create_session(req.slides, overlay_paths)
     return {
         "token": session.token,
         "url": f"/{session.token}/",
-        "slides_dir": session.slides_dir,
-        "single_slide": session.single_slide,
-        "overlay_dir": session.overlay_dir,
+        "slide_paths": session.slide_paths,
+        "overlay_paths": session.overlay_paths,
     }
 
 
@@ -288,61 +344,88 @@ async def list_slides(token: str):
     """List slides available in this session."""
     session = get_session_or_404(token)
     try:
-        if is_gcs_path(session.slides_dir):
-            if not GCS_AVAILABLE or gcs_client is None:
-                raise HTTPException(status_code=503, detail="GCS features not available")
-
-            bucket_name, prefix = parse_gcs_location(session.slides_dir)
-            bucket = gcs_client.bucket(bucket_name)
-            slides = []
-            target_filename = session.single_slide
-
-            # Single-file GCS sessions should resolve directly instead of scanning bucket.
-            if target_filename:
-                blob_path = join_blob_path(prefix, target_filename)
-                blob = bucket.blob(blob_path)
-                if not blob.exists():
-                    return {"slides": []}
-                stem = Path(target_filename).stem
-                return {"slides": [{
-                    'name': stem,
-                    'filename': target_filename,
-                    'size': blob.size or 0,
-                    'viewable': True,
-                }]}
-
-            blobs = bucket.list_blobs(prefix=prefix)
-            for blob in blobs:
-                filename = Path(blob.name).name
-                if not filename or not allowed_file(filename):
+        all_slides = []
+        seen_filenames = set()  # To deduplicate slides with same filename
+        
+        for slide_path in session.slide_paths:
+            if is_gcs_path(slide_path):
+                if not GCS_AVAILABLE or gcs_client is None:
+                    print(f"Warning: GCS path specified but GCS not available: {slide_path}")
                     continue
 
-                stem = Path(filename).stem
-                slides.append({
-                    'name': stem,
-                    'filename': filename,
-                    'size': blob.size or 0,
-                    'viewable': True,  # Always viewable with GeoTIFFTileSource
-                })
-            return {"slides": slides}
-
-        # Local files
-        upload_dir = Path(session.slides_dir)
-        if not upload_dir.exists():
-            return {"slides": []}
-
-        slides = []
-        for fp in upload_dir.iterdir():
-            if fp.is_file() and allowed_file(fp.name):
-                if session.single_slide and fp.name != session.single_slide:
+                bucket_name, prefix = parse_gcs_location(slide_path)
+                bucket = gcs_client.bucket(bucket_name)
+                
+                # Check if this is a direct file path or a directory
+                is_single_file = False
+                if prefix:
+                    # Check if it ends with an extension
+                    ext = prefix.rsplit(".", 1)[-1].lower() if "." in prefix else ""
+                    if ext in ALLOWED_EXTENSIONS:
+                        is_single_file = True
+                
+                if is_single_file:
+                    # Handle single file
+                    blob = bucket.blob(prefix)
+                    if blob.exists():
+                        filename = Path(prefix).name
+                        if filename not in seen_filenames:
+                            stem = Path(filename).stem
+                            all_slides.append({
+                                'name': stem,
+                                'filename': filename,
+                                'size': blob.size or 0,
+                                'viewable': True,
+                            })
+                            seen_filenames.add(filename)
+                else:
+                    # List all files in the directory/prefix
+                    blobs = bucket.list_blobs(prefix=prefix)
+                    for blob in blobs:
+                        filename = Path(blob.name).name
+                        if not filename or not allowed_file(filename):
+                            continue
+                        
+                        if filename not in seen_filenames:
+                            stem = Path(filename).stem
+                            all_slides.append({
+                                'name': stem,
+                                'filename': filename,
+                                'size': blob.size or 0,
+                                'viewable': True,
+                            })
+                            seen_filenames.add(filename)
+            
+            else:
+                # Local path
+                p = Path(slide_path)
+                if not p.exists():
+                    print(f"Warning: Local path does not exist: {slide_path}")
                     continue
-                slides.append({
-                    'name': fp.stem,
-                    'filename': fp.name,
-                    'size': fp.stat().st_size,
-                    'viewable': True,  # Always viewable with GeoTIFFTileSource
-                })
-        return {"slides": slides}
+                
+                if p.is_file():
+                    # Single file
+                    if allowed_file(p.name) and p.name not in seen_filenames:
+                        all_slides.append({
+                            'name': p.stem,
+                            'filename': p.name,
+                            'size': p.stat().st_size,
+                            'viewable': True,
+                        })
+                        seen_filenames.add(p.name)
+                else:
+                    # Directory
+                    for fp in p.iterdir():
+                        if fp.is_file() and allowed_file(fp.name) and fp.name not in seen_filenames:
+                            all_slides.append({
+                                'name': fp.stem,
+                                'filename': fp.name,
+                                'size': fp.stat().st_size,
+                                'viewable': True,
+                            })
+                            seen_filenames.add(fp.name)
+        
+        return {"slides": all_slides}
     except HTTPException:
         raise
     except Exception as e:
@@ -354,43 +437,69 @@ async def get_slide_info(token: str, slide_name: str):
     """Get metadata for a slide."""
     session = get_session_or_404(token)
     try:
-        if is_gcs_path(session.slides_dir):
-            bucket_name, blob_path, blob = ensure_gcs_blob_accessible(session, slide_name)
-            metadata = get_gcs_slide_metadata(bucket_name, blob_path, blob)
-            
-            # Return basic info with slide_source marker for frontend
-            return {
-                'filename': metadata['filename'],
-                'size': metadata['size'],
-                'content_type': metadata['content_type'],
-                'updated': metadata['updated'],
-                'properties': {
-                    'slide_source': 'gcs',
-                    'bucket': bucket_name,
-                    'path': blob_path
-                },
-                # Dummy dimensions for compatibility (GeoTIFFTileSource reads these from file)
-                'dimensions': [0, 0],
-                'level_count': 1,
-            }
-        else:
-            # Local file
-            slide_files = list(Path(session.slides_dir).glob(f"{slide_name}.*"))
-            if not slide_files:
-                raise HTTPException(status_code=404, detail="Slide not found")
-            
-            slide_path = slide_files[0]
-            return {
-                'filename': slide_path.name,
-                'size': slide_path.stat().st_size,
-                'properties': {
-                    'slide_source': 'local',
-                    'path': str(slide_path)
-                },
-                # Dummy dimensions for compatibility (GeoTIFFTileSource reads these from file)
-                'dimensions': [0, 0],
-                'level_count': 1,
-            }
+        # Search all slide paths for this slide
+        for slide_path in session.slide_paths:
+            if is_gcs_path(slide_path):
+                # Try GCS
+                try:
+                    bucket_name, prefix = parse_gcs_location(slide_path)
+                    bucket = gcs_client.bucket(bucket_name)
+                    
+                    # Try to find the slide file
+                    for ext in ALLOWED_EXTENSIONS:
+                        test_blob_path = join_blob_path(prefix, f"{slide_name}.{ext}")
+                        test_blob = bucket.blob(test_blob_path)
+                        if test_blob.exists():
+                            metadata = get_gcs_slide_metadata(bucket_name, test_blob_path, test_blob)
+                            return {
+                                'filename': metadata['filename'],
+                                'size': metadata['size'],
+                                'content_type': metadata['content_type'],
+                                'updated': metadata['updated'],
+                                'properties': {
+                                    'slide_source': 'gcs',
+                                    'bucket': bucket_name,
+                                    'path': test_blob_path
+                                },
+                                'dimensions': [0, 0],
+                                'level_count': 1,
+                            }
+                except Exception as e:
+                    print(f"Error checking GCS path {slide_path}: {e}")
+                    continue
+            else:
+                # Try local path
+                p = Path(slide_path)
+                if p.is_file():
+                    # Single file - check if it matches
+                    if p.stem == slide_name:
+                        return {
+                            'filename': p.name,
+                            'size': p.stat().st_size,
+                            'properties': {
+                                'slide_source': 'local',
+                                'path': str(p)
+                            },
+                            'dimensions': [0, 0],
+                            'level_count': 1,
+                        }
+                else:
+                    # Directory - search for matching file
+                    slide_files = list(p.glob(f"{slide_name}.*"))
+                    if slide_files:
+                        slide_file = slide_files[0]
+                        return {
+                            'filename': slide_file.name,
+                            'size': slide_file.stat().st_size,
+                            'properties': {
+                                'slide_source': 'local',
+                                'path': str(slide_file)
+                            },
+                            'dimensions': [0, 0],
+                            'level_count': 1,
+                        }
+        
+        raise HTTPException(status_code=404, detail="Slide not found in any configured path")
     except HTTPException:
         raise
     except Exception as e:
@@ -399,18 +508,30 @@ async def get_slide_info(token: str, slide_name: str):
 
 @app.post("/{token}/api/upload")
 async def upload_file(token: str, file: UploadFile = File(...)):
-    """Handle file upload to session's slides directory."""
+    """Handle file upload to session's first local slides directory."""
     session = get_session_or_404(token)
     try:
-        if is_gcs_path(session.slides_dir):
-            raise HTTPException(status_code=400, detail="Upload is not supported for GCS-backed sessions")
+        # Find the first local (non-GCS) slide path
+        upload_dir = None
+        for slide_path in session.slide_paths:
+            if not is_gcs_path(slide_path):
+                p = Path(slide_path)
+                if p.is_dir():
+                    upload_dir = p
+                    break
+                else:
+                    # If it's a file, use its parent directory
+                    upload_dir = p.parent
+                    break
+        
+        if upload_dir is None:
+            raise HTTPException(status_code=400, detail="Upload is not supported for GCS-only sessions")
 
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file selected")
         if not allowed_file(file.filename):
             raise HTTPException(status_code=400, detail="File type not supported")
 
-        upload_dir = Path(session.slides_dir)
         upload_dir.mkdir(exist_ok=True)
         file_path = upload_dir / file.filename
 
@@ -418,8 +539,7 @@ async def upload_file(token: str, file: UploadFile = File(...)):
             content = await file.read()
             buffer.write(content)
 
-        slide_info = session.converter.get_slide_info(file_path)
-        return {'success': True, 'filename': file.filename, 'name': file_path.stem, 'info': slide_info}
+        return {'success': True, 'filename': file.filename, 'name': file_path.stem}
     except HTTPException:
         raise
     except Exception as e:
@@ -430,15 +550,32 @@ async def upload_file(token: str, file: UploadFile = File(...)):
 async def delete_slide(token: str, slide_name: str):
     """Delete a slide (local files only, not supported for GCS)."""
     session = get_session_or_404(token)
-    if is_gcs_path(session.slides_dir):
-        raise HTTPException(status_code=400, detail="Delete not supported for GCS slides")
     
     try:
-        slide_files = list(Path(session.slides_dir).glob(f"{slide_name}.*"))
-        if not slide_files:
-            raise HTTPException(status_code=404, detail="Slide not found")
-        for sf in slide_files:
-            sf.unlink()
+        # Search all local slide paths for the file
+        deleted = False
+        for slide_path in session.slide_paths:
+            if is_gcs_path(slide_path):
+                continue  # Skip GCS paths
+            
+            p = Path(slide_path)
+            if p.is_dir():
+                slide_files = list(p.glob(f"{slide_name}.*"))
+                if slide_files:
+                    for sf in slide_files:
+                        sf.unlink()
+                    deleted = True
+                    break
+            else:
+                # Single file
+                if p.stem == slide_name:
+                    p.unlink()
+                    deleted = True
+                    break
+        
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Slide not found or is in GCS (delete not supported)")
+        
         return {'success': True, 'message': 'Slide deleted'}
     except HTTPException:
         raise
@@ -461,17 +598,17 @@ async def head_raw_slide(token: str, filename: str):
     """Handle HEAD requests for GeoTIFFTileSource compatibility."""
     session = get_session_or_404(token)
     try:
-        if is_gcs_path(session.slides_dir):
-            _, _, blob = get_gcs_blob_for_session(session, filename)
+        is_gcs, location = find_file_in_session(session, filename)
+        
+        if is_gcs:
+            _, _, blob = location
             blob.reload()  # Force reload to get size
             file_size = blob.size
             if not file_size or file_size == 0:
                 raise HTTPException(status_code=404, detail=f"File not found or empty")
             print(f"HEAD request - GCS file size: {file_size}")
         else:
-            file_path = Path(session.slides_dir) / filename
-            if not file_path.exists():
-                raise HTTPException(status_code=404, detail="File not found")
+            file_path = location
             file_size = file_path.stat().st_size
         
         ext = filename.rsplit('.', 1)[-1].lower() if "." in filename else ""
@@ -515,9 +652,12 @@ async def serve_raw_slide(token: str, filename: str, request: Request):
             'Content-Type': content_type
         }
 
-        if is_gcs_path(session.slides_dir):
+        # Find file across all slide paths
+        is_gcs, location = find_file_in_session(session, filename)
+        
+        if is_gcs:
             # GCS files: proxy with range request support
-            _, _, blob = get_gcs_blob_for_session(session, filename)
+            _, _, blob = location
             
             # Reload blob to get size
             blob.reload()
@@ -575,18 +715,39 @@ async def serve_raw_slide(token: str, filename: str, request: Request):
             })
         else:
             # Local files: serve with range request support
-            file_path = Path(session.slides_dir) / filename
-            try:
-                if not file_path.resolve().is_relative_to(Path(session.slides_dir).resolve()):
-                    raise HTTPException(status_code=403, detail="Access denied")
-            except AttributeError:
-                try:
-                    file_path.resolve().relative_to(Path(session.slides_dir).resolve())
-                except ValueError:
-                    raise HTTPException(status_code=403, detail="Access denied")
-
-            if not file_path.exists():
-                raise HTTPException(status_code=404, detail="File not found")
+            file_path = location
+            
+            # Security check: ensure file is in one of the authorized slide paths
+            is_authorized = False
+            resolved_file = file_path.resolve()
+            for slide_path in session.slide_paths:
+                if not is_gcs_path(slide_path):
+                    resolved_slide_path = Path(slide_path).resolve()
+                    if resolved_slide_path.is_file():
+                        # If slide_path is a file, check if it's the same file
+                        if resolved_file == resolved_slide_path:
+                            is_authorized = True
+                            break
+                    else:
+                        # If slide_path is a directory, check if file is within it
+                        try:
+                            if hasattr(resolved_file, 'is_relative_to'):
+                                if resolved_file.is_relative_to(resolved_slide_path):
+                                    is_authorized = True
+                                    break
+                            else:
+                                # Fallback for Python < 3.9
+                                try:
+                                    resolved_file.relative_to(resolved_slide_path)
+                                    is_authorized = True
+                                    break
+                                except ValueError:
+                                    pass
+                        except:
+                            pass
+            
+            if not is_authorized:
+                raise HTTPException(status_code=403, detail="Access denied")
 
             file_size = file_path.stat().st_size
             print(f"Local file size: {file_size}")
@@ -834,21 +995,32 @@ async def get_gcs_signed_url(blob_path: str = Query(...), expiration_hours: int 
 async def startup_event():
     """Create default session from CLI args and start cleanup loop."""
     # Create default session from CLI arguments
-    default_session = session_mgr.create_session(slides_path, args.overlay)
+    default_session = session_mgr.create_session(slide_paths, overlay_paths)
 
     # Start background cleanup
     await session_mgr.start_cleanup_loop(interval_minutes=5)
 
-    is_gcs = is_gcs_path(slides_path)
-    mode = "GCS" if is_gcs else "Local"
+    is_gcs = any(is_gcs_path(p) for p in slide_paths)
+    has_local = any(not is_gcs_path(p) for p in slide_paths)
+    
+    if is_gcs and has_local:
+        mode = "Mixed (GCS + Local)"
+    elif is_gcs:
+        mode = "GCS"
+    else:
+        mode = "Local"
     
     print("=" * 60)
     print("WSI Viewer Server - GeoTIFFTileSource Streaming")
     print("=" * 60)
     print(f"Mode: {mode}")
-    print(f"Slides: {slides_path}")
-    if args.overlay:
-        print(f"Overlay: {args.overlay}")
+    print(f"Slide paths ({len(slide_paths)}):")
+    for i, path in enumerate(slide_paths, 1):
+        print(f"  {i}. {path}")
+    if overlay_paths:
+        print(f"Overlay paths ({len(overlay_paths)}):")
+        for i, path in enumerate(overlay_paths, 1):
+            print(f"  {i}. {path}")
     print(f"Default session: http://localhost:8511/{default_session.token}/")
     print(f"Create new sessions: POST http://localhost:8511/api/sessions")
     print(f"API docs: http://localhost:8511/docs")

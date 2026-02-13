@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 
 ALLOWED_EXTENSIONS = {
@@ -33,9 +33,8 @@ def is_gcs_path(path: str) -> bool:
 class Session:
     """A viewer session with its own slide/overlay configuration."""
     token: str
-    slides_dir: str
-    overlay_dir: Optional[str]
-    single_slide: Optional[str]
+    slide_paths: List[str]  # List of slide paths (GCS URLs or local paths)
+    overlay_paths: List[str]  # List of overlay directories
     last_accessed: datetime = field(default_factory=datetime.utcnow)
     created_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -43,15 +42,33 @@ class Session:
         self.last_accessed = datetime.utcnow()
 
     def find_overlay_file(self, slide_name: str, suffix: str) -> Optional[str]:
-        """Find overlay file: check overlay dir first, then slides dir."""
+        """Find overlay file: search all overlay paths in order."""
         target = f"{slide_name}{suffix}"
-        if self.overlay_dir:
-            path = Path(self.overlay_dir) / target
-            if path.exists():
-                return str(path)
-        path = Path(self.slides_dir) / target
-        if path.exists():
-            return str(path)
+        
+        # Search all overlay directories
+        for overlay_path in self.overlay_paths:
+            if is_gcs_path(overlay_path):
+                # GCS overlay not yet supported, skip for now
+                continue
+            else:
+                # Check local path
+                path = Path(overlay_path) / target
+                if path.exists():
+                    return str(path)
+        
+        # Also check in each slide directory
+        for slide_path in self.slide_paths:
+            if not is_gcs_path(slide_path):
+                # For local paths, check if it's a directory or file
+                p = Path(slide_path)
+                if p.is_dir():
+                    check_path = p / target
+                else:
+                    check_path = p.parent / target
+                
+                if check_path.exists():
+                    return str(check_path)
+        
         return None
 
 
@@ -63,47 +80,51 @@ class SessionManager:
         self.ttl_minutes = ttl_minutes
         self._cleanup_task: Optional[asyncio.Task] = None
 
-    def create_session(self, slides_path: str, overlay_dir: Optional[str] = None) -> Session:
+    def create_session(self, slide_paths: List[str], overlay_paths: List[str] = None) -> Session:
         token = str(uuid.uuid4())
 
-        # Support both directory and single-file paths
-        single_slide = None
-        gcs_source = is_gcs_path(slides_path)
-        if gcs_source:
-            normalized = slides_path.strip().rstrip("/")
-            filename = normalized.rsplit("/", 1)[-1] if "/" in normalized else normalized
-            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        # Normalize overlay paths
+        if overlay_paths is None:
+            overlay_paths = []
 
-            if ext in ALLOWED_EXTENSIONS and "/" in normalized:
-                slides_dir = normalized.rsplit("/", 1)[0]
-                single_slide = filename
+        # Normalize all slide paths
+        normalized_slide_paths = []
+        for path in slide_paths:
+            path = path.strip()
+            if is_gcs_path(path):
+                # Keep GCS paths as-is
+                normalized_slide_paths.append(path)
             else:
-                slides_dir = normalized
-        else:
-            if Path(slides_path).is_file():
-                resolved = Path(slides_path).resolve()
-                slides_dir = str(resolved.parent)
-                single_slide = resolved.name
+                # Resolve local paths
+                p = Path(path)
+                if p.exists():
+                    normalized_slide_paths.append(str(p.resolve()))
+                else:
+                    print(f"Warning: Slide path does not exist: {path}")
+        
+        # Normalize overlay paths (local only for now)
+        normalized_overlay_paths = []
+        for path in overlay_paths:
+            if is_gcs_path(path):
+                # GCS overlays not yet supported, but keep for future
+                normalized_overlay_paths.append(path)
             else:
-                slides_dir = str(Path(slides_path).resolve())
-
-        # Validate overlay dir
-        resolved_overlay = None
-        if overlay_dir:
-            p = Path(overlay_dir)
-            if p.is_dir():
-                resolved_overlay = str(p.resolve())
+                p = Path(path)
+                if p.is_dir():
+                    normalized_overlay_paths.append(str(p.resolve()))
+                else:
+                    print(f"Warning: Overlay path does not exist or is not a directory: {path}")
 
         session = Session(
             token=token,
-            slides_dir=slides_dir,
-            overlay_dir=resolved_overlay,
-            single_slide=single_slide,
+            slide_paths=normalized_slide_paths,
+            overlay_paths=normalized_overlay_paths,
         )
         self.sessions[token] = session
 
-        mode = f"single-slide ({single_slide})" if single_slide else "directory"
-        print(f"✓ Session created: {token} [{mode}] slides={slides_dir}")
+        print(f"✓ Session created: {token}")
+        print(f"  Slide paths ({len(normalized_slide_paths)}): {normalized_slide_paths}")
+        print(f"  Overlay paths ({len(normalized_overlay_paths)}): {normalized_overlay_paths}")
         return session
 
     def get_session(self, token: str) -> Optional[Session]:

@@ -557,18 +557,20 @@ body {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     color: var(--text-primary);
-    font-size: 1.25rem;
     cursor: pointer;
     transition: all var(--transition-base);
     display: flex;
     align-items: center;
     justify-content: center;
     box-shadow: var(--shadow-sm);
+    padding: 0;
+    position: relative;
 }
 
 .control-btn:hover {
     background: rgba(79, 70, 229, 0.1);
     border-color: var(--accent-primary);
+    color: var(--accent-primary);
     transform: translateY(-2px);
     box-shadow: var(--shadow-glow);
 }
@@ -581,6 +583,53 @@ body {
     background: var(--accent-primary);
     color: white;
     border-color: var(--accent-primary);
+}
+
+.control-icon {
+    width: 20px;
+    height: 20px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* Tooltip */
+.control-btn::after {
+    content: attr(title);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%) scale(0.9);
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: all 0.2s ease;
+    z-index: 10000;
+}
+
+.control-btn::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: rgba(0, 0, 0, 0.9);
+    pointer-events: none;
+    opacity: 0;
+    transition: all 0.2s ease;
+    z-index: 10000;
+}
+
+.control-btn:hover::after,
+.control-btn:hover::before {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
 }
 
 .control-separator {
@@ -722,7 +771,11 @@ body {
     .control-btn {
         width: 40px;
         height: 40px;
-        font-size: 1rem;
+    }
+    
+    .control-icon {
+        width: 18px;
+        height: 18px;
     }
 }
 

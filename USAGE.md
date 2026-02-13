@@ -12,6 +12,17 @@ python app.py --slides https://storage.googleapis.com/wsi_viewer_test/TCGA-C5-A7
 
 # GCS folder
 python app.py --slides gs://my-bucket/slides-folder/
+
+# Multiple GCS files (NEW)
+python app.py --slides \
+  gs://bucket1/slide1.svs \
+  gs://bucket2/slide2.svs \
+  https://storage.googleapis.com/bucket3/slide3.svs
+
+# Mix of GCS files and folders
+python app.py --slides \
+  gs://bucket/folder1/ \
+  gs://bucket/folder2/slide.svs
 ```
 
 ### For Local Files
@@ -22,8 +33,15 @@ python app.py --slides-local /path/to/slides/
 # Single local file
 python app.py --slides-local /path/to/slide.svs
 
-# With overlay directory
-python app.py --slides-local /path/to/slides/ --overlay /path/to/overlays/
+# Multiple local paths (NEW)
+python app.py --slides-local \
+  /path/to/slide1.svs \
+  /path/to/slide2.svs \
+  /path/to/slides-folder/
+
+# With overlay directories (NEW: multiple)
+python app.py --slides-local /path/to/slides/ \
+  --overlay /overlays1/ /overlays2/
 ```
 
 ### Default (No Arguments)
@@ -45,6 +63,14 @@ python app.py
 3. Only requested byte ranges are downloaded
 4. Works with public buckets (no credentials needed)
 5. For private buckets, set `GCS_SERVICE_ACCOUNT_PATH` env var
+
+### Multiple Paths (NEW)
+You can now specify multiple slide sources in a single session:
+- **Multiple GCS files**: Specify explicit URLs from different buckets
+- **Multiple local paths**: Mix files and directories
+- **Multiple overlays**: Search directories in order for overlay files
+- **Deduplication**: Files with the same name are shown only once
+- **Search order**: Files are searched in the order paths are specified
 
 ## Browser Access
 

@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  wsi-viewer:
+    build: .
+    container_name: wsi-viewer
+    ports:
+      - "8511:8511"
+    volumes:
+      # Mount local slides directory (optional)
+      - ./uploads:/app/uploads
+      # Mount local overlays directory (optional)
+      - ./overlays:/app/overlays
+      # Mount GCS credentials (optional, for private buckets)
+      # - ~/.config/gcloud:/root/.config/gcloud:ro
+    environment:
+      # Optional: Set GCS service account path for private buckets
+      # - GCS_SERVICE_ACCOUNT_PATH=/app/gcs-key.json
+      # Session TTL in minutes
+      - SESSION_TTL=30
+    # Command override examples:
+    # For local files:
+    # command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8511"]
+    # For GCS files:
+    # command: ["python", "app.py", "--slides", "gs://bucket/path/"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8511/docs', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
