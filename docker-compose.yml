@@ -14,18 +14,18 @@ services:
       # Mount GCS credentials (optional, for private buckets)
       # - ~/.config/gcloud:/root/.config/gcloud:ro
     environment:
+      # Container listens on PORT (Cloud Run uses 8080; local default 8511)
+      - PORT=8511
       # Optional: Set GCS service account path for private buckets
       # - GCS_SERVICE_ACCOUNT_PATH=/app/gcs-key.json
       # Session TTL in minutes
       - SESSION_TTL=30
-    # Command override examples:
-    # For local files:
-    # command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8511"]
-    # For GCS files:
-    # command: ["python", "app.py", "--slides", "gs://bucket/path/"]
+    # Override slide paths via env (optional):
+    # - SLIDE_PATHS=gs://bucket/path/,https://storage.googleapis.com/bucket/slide.svs
+    # - OVERLAY_PATHS=/app/overlays
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8511/docs', timeout=5)"]
+      test: ["CMD", "python", "-c", "import os; from urllib.request import urlopen; port=os.environ.get('PORT','8080'); urlopen(f'http://localhost:{port}/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

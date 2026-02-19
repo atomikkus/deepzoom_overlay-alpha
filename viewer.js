@@ -34,7 +34,7 @@ const API_BASE = SESSION_TOKEN ? `/${SESSION_TOKEN}` : '';
 // Session keepalive heartbeat (every 5 minutes)
 if (SESSION_TOKEN) {
     setInterval(() => {
-        fetch(`/api/sessions/${SESSION_TOKEN}/heartbeat`, { method: 'POST' })
+        fetch(`/api/sessions/${SESSION_TOKEN}/heartbeat`, { method: 'POST', credentials: 'include' })
             .catch(() => console.warn('Heartbeat failed'));
     }, 5 * 60 * 1000);
 }
@@ -115,7 +115,7 @@ function initializeEventListeners() {
 
 async function loadSlides() {
     try {
-        const response = await fetch(`${API_BASE}/api/slides`);
+        const response = await fetch(`${API_BASE}/api/slides`, { credentials: 'include' });
         if (!response.ok) throw new Error('Failed to load slides');
 
         const data = await response.json();
@@ -281,7 +281,8 @@ async function loadInViewer(sourceUrl, type) {
             // Test URL accessibility first
             try {
                 const testResponse = await fetch(absoluteUrl, {
-                    method: 'HEAD'
+                    method: 'HEAD',
+                    credentials: 'include'
                 });
                 console.log('HEAD test status:', testResponse.status);
                 console.log('HEAD headers:', Object.fromEntries(testResponse.headers.entries()));
@@ -549,7 +550,7 @@ async function checkDensityOverlayAvailability(slideName) {
         const url = `${API_BASE}/api/overlay-config/${slideName}`;
         console.log(`Fetching: ${url}`);
         
-        const configResponse = await fetch(url);
+        const configResponse = await fetch(url, { credentials: 'include' });
         console.log(`Response status: ${configResponse.status}`);
         
         const config = configResponse.ok ? await configResponse.json() : null;
@@ -578,7 +579,7 @@ async function checkDensityOverlayAvailability(slideName) {
 
 async function loadOverlayConfigForSlide(slideName) {
     try {
-        const configResponse = await fetch(`${API_BASE}/api/overlay-config/${slideName}`);
+        const configResponse = await fetch(`${API_BASE}/api/overlay-config/${slideName}`, { credentials: 'include' });
         if (!configResponse.ok) {
             console.log('No overlay config available for current slide');
             window._overlayConfig = null;
@@ -635,7 +636,7 @@ async function loadDensityOverlay(config) {
         window._overlayGridUrl = config.grid;
 
         // Fetch metadata from the per-slide URL
-        const metadataResponse = await fetch(config.metadata);
+        const metadataResponse = await fetch(config.metadata, { credentials: 'include' });
         if (!metadataResponse.ok) {
             console.log('Could not load density overlay metadata');
             return;
@@ -752,7 +753,7 @@ async function toggleDensityOverlay(slideName) {
             try {
                 const gridUrl = window._overlayGridUrl;
                 if (gridUrl) {
-                    const response = await fetch(gridUrl);
+                    const response = await fetch(gridUrl, { credentials: 'include' });
                     if (response.ok) {
                         densityGridData = await response.json();
                         console.log('Density grid data loaded for interactive clicks');

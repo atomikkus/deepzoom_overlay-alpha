@@ -32,18 +32,13 @@ COPY styles.css .
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/cache
 
-# Default port (can be overridden by PORT env var)
-ENV PORT=8511
+# Cloud Run sets PORT at runtime (default 8080); GKE can set it too
+ENV PORT=8080
+EXPOSE 8080
 
-# Expose the application port
-EXPOSE $PORT
+# Health check: use PORT so Cloud Run/GKE can probe correctly
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import os; from urllib.request import urlopen; port=os.environ.get('PORT','8080'); urlopen(f'http://localhost:{port}/health', timeout=5)"
 
-# Health check (using Python's urllib - no extra dependencies needed)
-# Note: Health checks don't support ENV substitution, so we check multiple ports
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import os; from urllib.request import urlopen; port=os.getenv('PORT', '8511'); urlopen(f'http://localhost:{port}/docs', timeout=5)"
-
-# Run the application
-# Note: Using 0.0.0.0 to bind to all interfaces (required for Docker/Cloud Run)
-# The PORT environment variable is automatically set by Cloud Run
-CMD uvicorn app:app --host 0.0.0.0 --port $PORT
+# Run the application; PORT is read at runtime (Cloud Run injects it)
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"]

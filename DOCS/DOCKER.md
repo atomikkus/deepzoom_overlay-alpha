@@ -15,24 +15,59 @@ docker-compose logs -f
 docker-compose down
 ```
 
-The application will be available at `http://localhost:8511` (see docker-compose port mapping).
+The application will be available at `http://localhost:8511`
 
 ### Using Docker CLI
-
-The container listens on **PORT** (default **8080** in the Dockerfile for Cloud Run). For local use with port 8511:
 
 ```bash
 # Build the image
 docker build -t wsi-viewer .
 
-# Run (container port 8080 by default)
-docker run -d -p 8080:8080 --name wsi-viewer wsi-viewer
-
-# Or use port 8511 on host and in container
-docker run -d -p 8511:8511 -e PORT=8511 --name wsi-viewer wsi-viewer
+# Run the container
+docker run -d -p 8511:8511 --name wsi-viewer wsi-viewer
 ```
 
-**Cloud Run / GKE:** The same image is ready for Cloud Run and GKE. See [DOCS/CLOUD_RUN.md](DOCS/CLOUD_RUN.md).
+## Authentication
+
+The API requires authentication by default. See [AUTH.md](AUTH.md) for complete details.
+
+**Default credentials:**
+- Username: `admin`
+- Password: `admin`
+
+**Configure via environment variables:**
+
+```bash
+# Set custom credentials
+docker run -d \
+  -e AUTH_USERNAME=myuser \
+  -e AUTH_PASSWORD=mypassword \
+  -p 8511:8511 \
+  wsi-viewer
+```
+
+**For production, use password hash:**
+
+```bash
+# Generate hash
+python generate_password_hash.py
+
+# Use in Docker
+docker run -d \
+  -e AUTH_USERNAME=produser \
+  -e AUTH_PASSWORD_HASH='$2b$12$...' \
+  -p 8511:8511 \
+  wsi-viewer
+```
+
+**Disable authentication (development only):**
+
+```bash
+docker run -d \
+  -e AUTH_ENABLED=false \
+  -p 8511:8511 \
+  wsi-viewer
+```
 
 ## Configuration Options
 
@@ -118,6 +153,10 @@ docker run -d \
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `AUTH_ENABLED` | Enable/disable authentication | `true` |
+| `AUTH_USERNAME` | API username | `admin` |
+| `AUTH_PASSWORD` | API password (dev only) | `admin` |
+| `AUTH_PASSWORD_HASH` | API password hash (production) | None |
 | `GCS_SERVICE_ACCOUNT_PATH` | Path to GCS service account JSON | None |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google Cloud credentials path | None |
 | `SESSION_TTL` | Session timeout in minutes | 30 |
