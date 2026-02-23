@@ -7,6 +7,7 @@ The WSI Viewer is configured to run on **Google Cloud Run** and **GKE** (Google 
 - **PORT** – App listens on `PORT` (Cloud Run sets `PORT=8080` by default).
 - **/health** – Unauthenticated readiness/liveness endpoint for probes.
 - **SLIDE_PATHS / OVERLAY_PATHS** – Optional env vars to set slide and overlay paths without CLI (comma-separated).
+- **Auth split** – Only global API (create session, list/delete sessions, GCS) requires HTTP Basic Auth. Viewer routes `/{token}/...` do not; the session URL is the credential (shareable links).
 - **Dockerfile** – Uses `PORT` at runtime and a `/health`-based healthcheck.
 - **Graceful shutdown** – Handles SIGTERM and stops the cleanup loop.
 

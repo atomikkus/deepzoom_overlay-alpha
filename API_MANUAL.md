@@ -23,7 +23,7 @@ This document describes the HTTP API for the WSI (Whole Slide Imaging) Viewer. U
 ## 1. Base URL and Conventions
 
 - **Base URL:** `http://localhost:8511` (or your deployment host/port).
-- **All endpoints require HTTP Basic Authentication** unless noted.
+- **Authentication:** Only **global API** (session create/list/delete, heartbeat, GCS) requires HTTP Basic Auth. **Session viewer** routes `/{token}/...` do not; the token in the URL is the credential.
 - **Path parameters:** `{token}` is a session UUID; `{slide_name}` is the slide filename without extension; `{filename}` is the full filename.
 - **JSON:** Request bodies and many responses are JSON; `Content-Type: application/json` for POST bodies.
 - **Allowed slide extensions:** `svs`, `tif`, `tiff`, `vms`, `vmu`, `ndpi`, `scn`, `mrxs`, `svslide`, `bif`.
@@ -32,16 +32,14 @@ This document describes the HTTP API for the WSI (Whole Slide Imaging) Viewer. U
 
 ## 2. Authentication
 
-Every endpoint is protected with **HTTP Basic Auth**. Send credentials on each request.
+**Global API** (create session, list/delete sessions, heartbeat, GCS) requires **HTTP Basic Auth**. **Session viewer** (`/{token}/`, `/{token}/api/slides`, overlay, raw slide streaming, etc.) does **not** require auth — the session token in the URL is sufficient. Share `https://host/{token}/` and the recipient can view without a password.
 
-| Method | Header / Method |
-|--------|------------------|
-| **Browser** | When you open any URL, the server returns `401` and the browser shows a login dialog. After login, same-origin requests send the `Authorization` header automatically. |
-| **cURL** | `curl -u USERNAME:PASSWORD ...` |
-| **Python** | `requests.get(url, auth=HTTPBasicAuth(username, password))` |
-| **JavaScript** | `fetch(url, { credentials: 'include' })` after the user has logged in via the browser prompt. |
+| When | Auth |
+|------|------|
+| **Global API** (e.g. `POST /api/sessions`, `GET /api/sessions`, GCS) | Required: `curl -u USERNAME:PASSWORD`, or `Authorization: Basic ...` |
+| **Session URLs** (`/{token}/`, `/{token}/api/slides`, etc.) | Not required; token in path is the credential. |
 
-Default credentials (override with env vars `AUTH_USERNAME` and `AUTH_PASSWORD`):
+Default credentials for global API (override with env vars `AUTH_USERNAME` and `AUTH_PASSWORD`):
 
 - **Username:** `satya@4basecare.com`
 - **Password:** `satya123`
@@ -73,18 +71,23 @@ Creates a new viewer session with the given slide and overlay paths.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `slides` | array of strings | Yes | List of slide paths: GCS URIs (`gs://bucket/path` or `https://storage.googleapis.com/...`) and/or local paths. Can be files or directories. |
-| `overlay` | array of strings | No | List of overlay directories (searched in order for overlay files). |
+| `overlay` | array of strings | No | Overlay sources: local directory, local `.zip` path, or http(s) URL to a `.zip` (e.g. signed URL). Zips are downloaded/extracted once per session; overlay files are searched in the extracted dir (and in plain dirs). |
 
-**Example request:**
+**Example request (directories):**
 
 ```json
 {
-  "slides": [
-    "gs://my-bucket/slides/slide1.svs",
-    "https://storage.googleapis.com/my-bucket/slide2.svs",
-    "/path/to/local/slides"
-  ],
+  "slides": ["/path/to/local/slides"],
   "overlay": ["/path/to/overlays"]
+}
+```
+
+**Example request (overlay from zip URL):**
+
+```json
+{
+  "slides": ["https://storage.googleapis.com/bucket/slide.svs"],
+  "overlay": ["https://storage.googleapis.com/bucket/overlays.zip?X-Goog-Signature=..."]
 }
 ```
 
@@ -192,7 +195,7 @@ These endpoints serve the viewer UI and assets for a given session. The session 
 
 ## 6. Slides API
 
-All slide endpoints are under `/{token}/api/` and require a valid session token and HTTP Basic Auth.
+All slide endpoints are under `/{token}/api/` and require only a valid session token (no HTTP Basic Auth).
 
 ### 5.1 List slides
 
@@ -389,7 +392,12 @@ Streams the file. Clients should send a `Range` header for partial content.
 
 ## 8. Overlay API
 
-Overlays (e.g. density maps) are per-slide files: `{slide_name}_density.png`, `{slide_name}_metadata.json`, `{slide_name}_grid.json`. The API exposes config and file URLs, then serves the files.
+Overlays (e.g. density maps) are per-slide files: `{slide_name}_density.png`, `{slide_name}_metadata.json`, `{slide_name}_grid.json`. Overlay sources can be:
+
+- **Local directory** — files at `dir/{slide_name}_density.png`, etc.
+- **Local or URL .zip** — archive is extracted once per session; files are looked up at the extracted root or inside a single top-level folder (e.g. `SlideName/SlideName_density.png`).
+
+The API exposes config and file URLs, then serves the files via the overlay endpoints below.
 
 ### 7.1 Overlay config
 
@@ -581,7 +589,7 @@ Generates a time-limited signed URL for a blob.
 | HTTP Code | Meaning |
 |-----------|---------|
 | 400 | Bad request (e.g. invalid body, path not found for create session, unsupported upload). |
-| 401 | Unauthorized — missing or invalid HTTP Basic credentials. |
+| 401 | Unauthorized — missing or invalid HTTP Basic credentials (global API only). |
 | 403 | Forbidden — e.g. raw slide path not under allowed directories. |
 | 404 | Not found — session, slide, overlay file, or GCS blob. |
 | 416 | Range not satisfiable — invalid or out-of-range byte range for raw slide. |
@@ -616,17 +624,14 @@ curl -u satya@4basecare.com:satya123 -X POST http://localhost:8511/api/sessions 
     "overlay": ["/path/to/overlays"]
   }'
 
-# List slides in session
-curl -u satya@4basecare.com:satya123 \
-  "http://localhost:8511/TOKEN/api/slides"
+# List slides in session (no auth — token in URL is enough)
+curl "http://localhost:8511/TOKEN/api/slides"
 
 # Get overlay config for a slide
-curl -u satya@4basecare.com:satya123 \
-  "http://localhost:8511/TOKEN/api/overlay-config/slide1"
+curl "http://localhost:8511/TOKEN/api/overlay-config/slide1"
 
 # HEAD raw slide (for range requests)
-curl -u satya@4basecare.com:satya123 -I \
-  "http://localhost:8511/TOKEN/api/raw_slides/slide1.svs"
+curl -I "http://localhost:8511/TOKEN/api/raw_slides/slide1.svs"
 
 # Download from GCS to server
 curl -u satya@4basecare.com:satya123 -X POST \
@@ -656,15 +661,15 @@ data = r.json()
 token = data["token"]
 print("Session URL:", f"{BASE}/{token}/")
 
-# List slides
-r = requests.get(f"{BASE}/{token}/api/slides", auth=AUTH)
+# List slides (session URL — no auth needed)
+r = requests.get(f"{BASE}/{token}/api/slides")
 r.raise_for_status()
 slides = r.json()["slides"]
 for s in slides:
     print(s["filename"], s["size"])
 
 # Get slide info
-r = requests.get(f"{BASE}/{token}/api/info/slide1", auth=AUTH)
+r = requests.get(f"{BASE}/{token}/api/info/slide1")
 r.raise_for_status()
 info = r.json()
 print(info["properties"]["slide_source"], info["filename"])
@@ -672,7 +677,6 @@ print(info["properties"]["slide_source"], info["filename"])
 # Stream raw slide (first 64KB)
 r = requests.get(
     f"{BASE}/{token}/api/raw_slides/slide1.svs",
-    auth=AUTH,
     headers={"Range": "bytes=0-65535"},
 )
 print(r.status_code, len(r.content))  # 206, 65536
@@ -680,33 +684,29 @@ print(r.status_code, len(r.content))  # 206, 65536
 
 ### 10.3 JavaScript (browser)
 
-After the user has logged in via the browser’s HTTP Basic dialog, use `credentials: 'include'` so the browser sends the auth header:
+Session URLs do not require auth; the token in the path is enough. Use plain `fetch` (optionally `credentials: 'include'` for same-origin):
 
 ```javascript
 const base = 'http://localhost:8511';
 const token = '550e8400-e29b-41d4-a716-446655440000';
 
 // List slides
-const res = await fetch(`${base}/${token}/api/slides`, {
-  credentials: 'include',
-});
+const res = await fetch(`${base}/${token}/api/slides`);
 const { slides } = await res.json();
 
 // Overlay config
-const configRes = await fetch(`${base}/${token}/api/overlay-config/slide1`, {
-  credentials: 'include',
-});
+const configRes = await fetch(`${base}/${token}/api/overlay-config/slide1`);
 const config = await configRes.json();
 if (config.available) {
-  const metaRes = await fetch(`${base}${config.metadata}`, { credentials: 'include' });
+  const metaRes = await fetch(`${base}${config.metadata}`);
   const metadata = await metaRes.json();
 }
 ```
 
 ### 10.4 Typical viewer flow
 
-1. **Create session** — `POST /api/sessions` with slide and overlay paths.
-2. **Open viewer** — Navigate to `/{token}/` and complete HTTP Basic login if prompted.
+1. **Create session** — `POST /api/sessions` with slide and overlay paths (requires Basic Auth).
+2. **Open viewer** — Navigate to `/{token}/`; no login — the session URL is the credential.
 3. **List slides** — Frontend calls `GET /{token}/api/slides` and displays the list.
 4. **Load slide** — Client uses `/{token}/api/raw_slides/{filename}` with range requests (e.g. via GeoTIFFTileSource).
 5. **Overlays** — `GET /{token}/api/overlay-config/{slide_name}` then fetch `density_image`, `metadata`, and `grid` URLs as needed.

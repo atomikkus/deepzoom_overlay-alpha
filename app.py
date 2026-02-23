@@ -5,6 +5,7 @@ Each session has its own slides directory, overlay, and converter.
 """
 
 import os
+import asyncio
 import zipfile
 import tempfile
 import shutil
@@ -18,7 +19,15 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
-from session_manager import SessionManager, ALLOWED_EXTENSIONS, is_gcs_path, is_url, is_zip_path
+from session_manager import (
+    SessionManager,
+    ALLOWED_EXTENSIONS,
+    is_gcs_path,
+    is_url,
+    is_zip_path,
+    is_direct_slide_url,
+    url_to_slide_filename,
+)
 
 
 # Google Cloud Storage imports
@@ -53,6 +62,8 @@ parser.add_argument("--slides-local", type=str, nargs='*', default=None,
                     help="One or more local paths to slides")
 parser.add_argument("--overlay", type=str, nargs='*', default=None,
                     help="Overlay sources: local directory, local .zip, or http(s) URL to a .zip (e.g. signed URL)")
+parser.add_argument("--thumbnails", type=str, nargs='*', default=None,
+                    help="Thumbnail sources: local directory, local .zip, http(s) URL to .zip, or GCS prefix (gs://bucket/prefix/)")
 parser.add_argument("--session-ttl", type=int, default=30,
                     help="Session TTL in minutes (default: 30)")
 args, unknown = parser.parse_known_args()
@@ -72,6 +83,7 @@ else:
 
 # Build list of overlay paths
 overlay_paths = args.overlay if args.overlay else []
+thumbnail_paths = args.thumbnails if args.thumbnails else []
 
 # Cloud Run / GKE: override from environment (no CLI in container)
 _PORT = os.getenv("PORT", "8511")
@@ -80,6 +92,8 @@ if os.getenv("SLIDE_PATHS"):
     slide_paths = [p.strip() for p in os.getenv("SLIDE_PATHS", "").split(",") if p.strip()]
 if os.getenv("OVERLAY_PATHS"):
     overlay_paths = [p.strip() for p in os.getenv("OVERLAY_PATHS", "").split(",") if p.strip()]
+if os.getenv("THUMBNAIL_PATHS"):
+    thumbnail_paths = [p.strip() for p in os.getenv("THUMBNAIL_PATHS", "").split(",") if p.strip()]
 
 # Initialize session manager (no cache dir needed without conversion)
 session_mgr = SessionManager(ttl_minutes=args.session_ttl)
@@ -87,13 +101,15 @@ session_mgr = SessionManager(ttl_minutes=args.session_ttl)
 # ========================================
 # Authorization (HTTP Basic Auth)
 # ========================================
+# Auth is required only for global API: create/list/delete sessions, heartbeat, GCS.
+# Session viewer routes (/{token}/...) do NOT require auth; the token in the URL is the credential.
 AUTH_USERNAME = os.getenv("AUTH_USERNAME", "satya@4basecare.com")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "satya123")
 security = HTTPBasic()
 
 
 def verify_basic_auth(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify HTTP Basic Auth credentials. Raises 401 if invalid."""
+    """Verify HTTP Basic Auth credentials. Used only on global API routes. Raises 401 if invalid."""
     if credentials.username != AUTH_USERNAME or credentials.password != AUTH_PASSWORD:
         raise HTTPException(
             status_code=401,
@@ -150,12 +166,15 @@ def get_session_or_404(token: str):
 
 def find_file_in_session(session, filename: str):
     """Find a file across all slide paths in the session.
-    Returns: tuple of (is_gcs, location_info)
+    Returns:
+    - For direct URL: ("url", url_str)
     - For GCS: (True, (bucket_name, blob_path, blob))
     - For local: (False, file_path)
     Raises HTTPException if not found.
     """
     for slide_path in session.slide_paths:
+        if is_direct_slide_url(slide_path) and url_to_slide_filename(slide_path) == filename:
+            return "url", slide_path
         if is_gcs_path(slide_path):
             # Try GCS
             try:
@@ -297,25 +316,27 @@ def allowed_file(filename: str) -> bool:
 
 class CreateSessionRequest(BaseModel):
     slides: List[str]  # List of slide paths (GCS or local)
-    overlay: Optional[List[str]] = None  # List of overlay directories
+    overlay: Optional[List[str]] = None  # Overlay dirs/zips/URLs
+    thumbnail: Optional[List[str]] = None  # Thumbnail dirs/zips/URLs or GCS prefix
 
 
 @app.post("/api/sessions")
 async def create_session(req: CreateSessionRequest, _: str = Depends(verify_basic_auth)):
     """Create a new viewer session."""
-    # Validate local paths
     for slide_path in req.slides:
         if not is_gcs_path(slide_path):
             if not Path(slide_path).exists():
                 raise HTTPException(status_code=400, detail=f"Path not found: {slide_path}")
     
     overlay_paths = req.overlay if req.overlay else []
-    session = session_mgr.create_session(req.slides, overlay_paths)
+    thumb_paths = req.thumbnail if req.thumbnail else []
+    session = session_mgr.create_session(req.slides, overlay_paths, thumbnail_paths=thumb_paths)
     return {
         "token": session.token,
         "url": f"/{session.token}/",
         "slide_paths": session.slide_paths,
         "overlay_paths": session.overlay_paths,
+        "thumbnail_paths": session.thumbnail_paths,
     }
 
 
@@ -345,6 +366,7 @@ async def list_sessions(_: str = Depends(verify_basic_auth)):
                 "token": s.token,
                 "slide_paths": s.slide_paths,
                 "overlay_paths": s.overlay_paths,
+                "thumbnail_paths": s.thumbnail_paths,
                 "created_at": s.created_at.isoformat(),
                 "last_accessed": s.last_accessed.isoformat(),
             }
@@ -358,20 +380,20 @@ async def list_sessions(_: str = Depends(verify_basic_auth)):
 # ========================================
 
 @app.get("/{token}/")
-async def session_index(token: str, _: str = Depends(verify_basic_auth)):
+async def session_index(token: str):
     """Serve the viewer HTML for a session."""
     get_session_or_404(token)
     return FileResponse('index.html')
 
 
 @app.get("/{token}/styles.css")
-async def session_css(token: str, _: str = Depends(verify_basic_auth)):
+async def session_css(token: str):
     get_session_or_404(token)
     return FileResponse('styles.css', media_type='text/css')
 
 
 @app.get("/{token}/viewer.js")
-async def session_js(token: str, _: str = Depends(verify_basic_auth)):
+async def session_js(token: str):
     get_session_or_404(token)
     return FileResponse('viewer.js', media_type='application/javascript')
 
@@ -381,14 +403,29 @@ async def session_js(token: str, _: str = Depends(verify_basic_auth)):
 # ========================================
 
 @app.get("/{token}/api/slides")
-async def list_slides(token: str, _: str = Depends(verify_basic_auth)):
-    """List slides available in this session."""
+async def list_slides(token: str):
+    """List slides available in this session. Each slide includes a thumbnail URL if available."""
     session = get_session_or_404(token)
+    await resolve_overlay_zip(session)
     try:
         all_slides = []
         seen_filenames = set()  # To deduplicate slides with same filename
         
         for slide_path in session.slide_paths:
+            if is_direct_slide_url(slide_path):
+                filename = url_to_slide_filename(slide_path)
+                if not filename or filename in seen_filenames:
+                    continue
+                stem = Path(filename).stem
+                all_slides.append({
+                    'name': stem,
+                    'filename': filename,
+                    'size': 0,
+                    'viewable': True,
+                    'thumbnail': f"/{token}/api/thumbnail/{stem}",
+                })
+                seen_filenames.add(filename)
+                continue
             if is_gcs_path(slide_path):
                 if not GCS_AVAILABLE or gcs_client is None:
                     print(f"Warning: GCS path specified but GCS not available: {slide_path}")
@@ -417,6 +454,7 @@ async def list_slides(token: str, _: str = Depends(verify_basic_auth)):
                                 'filename': filename,
                                 'size': blob.size or 0,
                                 'viewable': True,
+                                'thumbnail': f"/{token}/api/thumbnail/{stem}",
                             })
                             seen_filenames.add(filename)
                 else:
@@ -434,6 +472,7 @@ async def list_slides(token: str, _: str = Depends(verify_basic_auth)):
                                 'filename': filename,
                                 'size': blob.size or 0,
                                 'viewable': True,
+                                'thumbnail': f"/{token}/api/thumbnail/{stem}",
                             })
                             seen_filenames.add(filename)
             
@@ -452,6 +491,7 @@ async def list_slides(token: str, _: str = Depends(verify_basic_auth)):
                             'filename': p.name,
                             'size': p.stat().st_size,
                             'viewable': True,
+                            'thumbnail': f"/{token}/api/thumbnail/{p.stem}",
                         })
                         seen_filenames.add(p.name)
                 else:
@@ -463,6 +503,7 @@ async def list_slides(token: str, _: str = Depends(verify_basic_auth)):
                                 'filename': fp.name,
                                 'size': fp.stat().st_size,
                                 'viewable': True,
+                                'thumbnail': f"/{token}/api/thumbnail/{fp.stem}",
                             })
                             seen_filenames.add(fp.name)
         
@@ -474,12 +515,23 @@ async def list_slides(token: str, _: str = Depends(verify_basic_auth)):
 
 
 @app.get("/{token}/api/info/{slide_name}")
-async def get_slide_info(token: str, slide_name: str, _: str = Depends(verify_basic_auth)):
+async def get_slide_info(token: str, slide_name: str):
     """Get metadata for a slide."""
     session = get_session_or_404(token)
     try:
         # Search all slide paths for this slide
         for slide_path in session.slide_paths:
+            if is_direct_slide_url(slide_path):
+                filename = url_to_slide_filename(slide_path)
+                if filename and Path(filename).stem == slide_name:
+                    return {
+                        'filename': filename,
+                        'size': 0,
+                        'properties': {'slide_source': 'url', 'url': slide_path},
+                        'dimensions': [0, 0],
+                        'level_count': 1,
+                    }
+                continue
             if is_gcs_path(slide_path):
                 # Try GCS
                 try:
@@ -548,7 +600,7 @@ async def get_slide_info(token: str, slide_name: str, _: str = Depends(verify_ba
 
 
 @app.post("/{token}/api/upload")
-async def upload_file(token: str, file: UploadFile = File(...), _: str = Depends(verify_basic_auth)):
+async def upload_file(token: str, file: UploadFile = File(...)):
     """Handle file upload to session's first local slides directory."""
     session = get_session_or_404(token)
     try:
@@ -588,17 +640,17 @@ async def upload_file(token: str, file: UploadFile = File(...), _: str = Depends
 
 
 @app.delete("/{token}/api/delete/{slide_name}")
-async def delete_slide(token: str, slide_name: str, _: str = Depends(verify_basic_auth)):
+async def delete_slide(token: str, slide_name: str):
     """Delete a slide (local files only, not supported for GCS)."""
     session = get_session_or_404(token)
     
     try:
-        # Search all local slide paths for the file
+        # Search all local slide paths for the file (skip GCS and direct URL)
         deleted = False
         for slide_path in session.slide_paths:
-            if is_gcs_path(slide_path):
-                continue  # Skip GCS paths
-            
+            if is_direct_slide_url(slide_path) or is_gcs_path(slide_path):
+                continue
+
             p = Path(slide_path)
             if p.is_dir():
                 slide_files = list(p.glob(f"{slide_name}.*"))
@@ -615,7 +667,7 @@ async def delete_slide(token: str, slide_name: str, _: str = Depends(verify_basi
                     break
         
         if not deleted:
-            raise HTTPException(status_code=404, detail="Slide not found or is in GCS (delete not supported)")
+            raise HTTPException(status_code=404, detail="Slide not found or is in GCS/URL (delete not supported)")
         
         return {'success': True, 'message': 'Slide deleted'}
     except HTTPException:
@@ -624,7 +676,7 @@ async def delete_slide(token: str, slide_name: str, _: str = Depends(verify_basi
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.options("/{token}/api/raw_slides/{filename:path}")
-async def options_raw_slide(token: str, filename: str, _: str = Depends(verify_basic_auth)):
+async def options_raw_slide(token: str, filename: str):
     return Response(status_code=200, headers={
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -634,35 +686,69 @@ async def options_raw_slide(token: str, filename: str, _: str = Depends(verify_b
     })
 
 
+def _head_direct_url(url: str):
+    """Perform HEAD request to URL; return (content_length, accept_ranges). Raises on failure."""
+    req = urllib.request.Request(url, method="HEAD")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        cl = resp.headers.get("Content-Length")
+        content_length = int(cl) if cl and cl.isdigit() else 0
+        accept_ranges = resp.headers.get("Accept-Ranges", "bytes")
+    return content_length, accept_ranges
+
+
+def _fetch_url_range(url: str, range_header: Optional[str] = None):
+    """GET url with optional Range header; return (status_code, headers_dict, body_bytes)."""
+    req = urllib.request.Request(url)
+    if range_header:
+        req.add_header("Range", range_header)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = resp.read()
+    status = resp.status
+    out_headers = {}
+    for key in ("Content-Length", "Content-Range", "Content-Type", "Accept-Ranges"):
+        if resp.headers.get(key):
+            out_headers[key] = resp.headers[key]
+    return status, out_headers, body
+
+
 @app.head("/{token}/api/raw_slides/{filename:path}")
-async def head_raw_slide(token: str, filename: str, _: str = Depends(verify_basic_auth)):
+async def head_raw_slide(token: str, filename: str):
     """Handle HEAD requests for GeoTIFFTileSource compatibility."""
     session = get_session_or_404(token)
     try:
-        is_gcs, location = find_file_in_session(session, filename)
-        
-        if is_gcs:
+        result = find_file_in_session(session, filename)
+        is_gcs, location = result[0], result[1]
+
+        if is_gcs == "url":
+            file_size, accept_ranges = await asyncio.get_event_loop().run_in_executor(
+                None, _head_direct_url, location
+            )
+            if not file_size:
+                raise HTTPException(status_code=404, detail="File not found or empty")
+        elif is_gcs:
             _, _, blob = location
             blob.reload()  # Force reload to get size
             file_size = blob.size
             if not file_size or file_size == 0:
                 raise HTTPException(status_code=404, detail=f"File not found or empty")
             print(f"HEAD request - GCS file size: {file_size}")
+            accept_ranges = "bytes"
         else:
             file_path = location
             file_size = file_path.stat().st_size
-        
+            accept_ranges = "bytes"
+
         ext = filename.rsplit('.', 1)[-1].lower() if "." in filename else ""
         content_type_map = {
             'svs': 'image/tiff', 'tif': 'image/tiff', 'tiff': 'image/tiff',
         }
         content_type = content_type_map.get(ext, 'application/octet-stream')
-        
+
         return Response(status_code=200, headers={
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
             'Access-Control-Expose-Headers': 'Content-Length, Content-Type, Accept-Ranges',
-            'Accept-Ranges': 'bytes',
+            'Accept-Ranges': accept_ranges,
             'Content-Type': content_type,
             'Content-Length': str(file_size)
         })
@@ -674,7 +760,7 @@ async def head_raw_slide(token: str, filename: str, _: str = Depends(verify_basi
 
 
 @app.get("/{token}/api/raw_slides/{filename:path}")
-async def serve_raw_slide(token: str, filename: str, request: Request, _: str = Depends(verify_basic_auth)):
+async def serve_raw_slide(token: str, filename: str, request: Request):
     """Serve raw slide files with range request support (CORS proxy for GCS, direct serve for local)."""
     session = get_session_or_404(token)
     try:
@@ -694,8 +780,22 @@ async def serve_raw_slide(token: str, filename: str, request: Request, _: str = 
         }
 
         # Find file across all slide paths
-        is_gcs, location = find_file_in_session(session, filename)
-        
+        result = find_file_in_session(session, filename)
+        is_gcs, location = result[0], result[1]
+
+        if is_gcs == "url":
+            # Direct URL (public or signed): proxy GET with Range
+            range_header = request.headers.get("range")
+            status, out_headers, body = await asyncio.get_event_loop().run_in_executor(
+                None, _fetch_url_range, location, range_header
+            )
+            if status >= 400:
+                raise HTTPException(status_code=502, detail="Upstream request failed")
+            resp_headers = {**cors_headers, **out_headers}
+            if "Accept-Ranges" not in resp_headers:
+                resp_headers["Accept-Ranges"] = "bytes"
+            return Response(content=body, status_code=status, headers=resp_headers)
+
         if is_gcs:
             # GCS files: proxy with range request support
             _, _, blob = location
@@ -904,25 +1004,129 @@ async def resolve_overlay_zip(session) -> None:
         print(f"Warning: Failed to extract overlay zip: {e}")
 
 
+async def resolve_thumbnail_zip(session) -> None:
+    """Extract any thumbnail_paths that are zips/URLs into session.thumbnail_extracted_dir."""
+    if session.thumbnail_extracted_dir:
+        return
+    zip_sources = [
+        p for p in session.thumbnail_paths
+        if is_zip_path(p) or (is_url(p) and not is_gcs_path(p))
+    ]
+    if not zip_sources:
+        return
+    import asyncio
+    loop = asyncio.get_event_loop()
+    tmp_dir = tempfile.mkdtemp(prefix="wsi_thumb_")
+    try:
+        for source in zip_sources:
+            extracted = await loop.run_in_executor(None, _extract_zip_to_tempdir, source)
+            for item in Path(extracted).rglob("*"):
+                if item.is_file():
+                    dest = Path(tmp_dir) / item.relative_to(extracted)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(item), str(dest))
+            shutil.rmtree(extracted, ignore_errors=True)
+        session.thumbnail_extracted_dir = tmp_dir
+        print(f"Thumbnail zip extracted to: {tmp_dir}")
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        print(f"Warning: Failed to extract thumbnail zip: {e}")
+
+
+def _stream_thumbnail_from_direct_url(session, slide_name: str):
+    """If thumbnail_paths contains a direct http(s) URL to a PNG for this slide, download and return (bytes, type)."""
+    suffixes = ("_tb.png", "_thumb.png", "_thumbnail.png")
+    for url in session.thumbnail_paths:
+        if not is_url(url) or is_gcs_path(url):
+            continue
+        # Strip query string for matching
+        path_part = url.split("?")[0].rstrip("/")
+        for suffix in suffixes:
+            if path_part.endswith(f"{slide_name}{suffix}"):
+                try:
+                    with urllib.request.urlopen(url, timeout=30) as resp:
+                        data = resp.read()
+                    return (data, "image/png")
+                except Exception:
+                    return None
+    return None
+
+
+def _stream_thumbnail_from_gcs(session, slide_name: str):
+    """Try to find and stream thumbnail from GCS thumbnail_paths (direct object URL or prefix). Returns (content_bytes, content_type) or None."""
+    if not GCS_AVAILABLE or gcs_client is None:
+        return None
+    suffixes = ("_tb.png", "_thumb.png", "_thumbnail.png")
+    for tp in session.thumbnail_paths:
+        if not is_gcs_path(tp):
+            continue
+        try:
+            bucket_name, object_path = parse_gcs_location(tp)
+            bucket = gcs_client.bucket(bucket_name)
+            path_clean = (object_path or "").strip("/")
+            # Direct object URL (e.g. gs://bucket/Head_neck_pathology_tb.png)
+            for suffix in suffixes:
+                if path_clean.endswith(f"{slide_name}{suffix}"):
+                    blob = bucket.blob(path_clean)
+                    if blob.exists():
+                        data = blob.download_as_bytes()
+                        return (data, "image/png")
+            # Prefix: look for prefix/slide_name_suffix
+            for suffix in suffixes:
+                blob_path = f"{path_clean}/{slide_name}{suffix}" if path_clean else f"{slide_name}{suffix}"
+                blob = bucket.blob(blob_path)
+                if blob.exists():
+                    data = blob.download_as_bytes()
+                    return (data, "image/png")
+        except Exception:
+            continue
+    return None
+
+
+@app.get("/{token}/api/thumbnail/{slide_name}")
+async def serve_thumbnail(token: str, slide_name: str):
+    """Serve thumbnail for a slide from overlay, slide dir, thumbnail_paths (dir/zip/direct URL), or GCS."""
+    session = get_session_or_404(token)
+    await resolve_overlay_zip(session)
+    await resolve_thumbnail_zip(session)
+    path = session.find_thumbnail(slide_name)
+    if path:
+        return FileResponse(path, media_type="image/png")
+    loop = asyncio.get_event_loop()
+    # Direct thumbnail URL (e.g. --thumbnails https://.../Head_neck_pathology_tb.png)
+    direct = await loop.run_in_executor(None, _stream_thumbnail_from_direct_url, session, slide_name)
+    if direct:
+        content, media_type = direct
+        return Response(content=content, media_type=media_type)
+    # GCS prefix in thumbnail_paths
+    gcs_result = await loop.run_in_executor(None, _stream_thumbnail_from_gcs, session, slide_name)
+    if gcs_result:
+        content, media_type = gcs_result
+        return Response(content=content, media_type=media_type)
+    raise HTTPException(status_code=404, detail=f"Thumbnail not found for slide: {slide_name}")
+
+
 @app.get("/{token}/api/overlay-config/{slide_name}")
-async def get_overlay_config(token: str, slide_name: str, _: str = Depends(verify_basic_auth)):
+async def get_overlay_config(token: str, slide_name: str):
     """Get per-slide overlay configuration."""
     session = get_session_or_404(token)
     await resolve_overlay_zip(session)
     density = session.find_overlay_file(slide_name, '_density.png')
     metadata = session.find_overlay_file(slide_name, '_metadata.json')
     grid = session.find_overlay_file(slide_name, '_grid.json')
+    thumb = session.find_thumbnail(slide_name)
     available = density is not None and metadata is not None
     return {
         "available": available,
         "density_image": f"/{token}/api/overlay-file/{slide_name}_density.png" if density else None,
         "metadata": f"/{token}/api/overlay-file/{slide_name}_metadata.json" if metadata else None,
         "grid": f"/{token}/api/overlay-file/{slide_name}_grid.json" if grid else None,
+        "thumbnail": f"/{token}/api/thumbnail/{slide_name}" if thumb else None,
     }
 
 
 @app.get("/{token}/api/overlay-file/{filename}")
-async def serve_overlay_file(token: str, filename: str, _: str = Depends(verify_basic_auth)):
+async def serve_overlay_file(token: str, filename: str):
     """Serve an overlay file from overlay dir or slides dir."""
     session = get_session_or_404(token)
     await resolve_overlay_zip(session)
@@ -1102,7 +1306,7 @@ async def get_gcs_signed_url(blob_path: str = Query(...), expiration_hours: int 
 async def startup_event():
     """Create default session from CLI args and start cleanup loop."""
     # Create default session from CLI arguments
-    default_session = session_mgr.create_session(slide_paths, overlay_paths)
+    default_session = session_mgr.create_session(slide_paths, overlay_paths, thumbnail_paths=thumbnail_paths)
 
     # Start background cleanup
     await session_mgr.start_cleanup_loop(interval_minutes=5)
@@ -1127,6 +1331,10 @@ async def startup_event():
     if overlay_paths:
         print(f"Overlay paths ({len(overlay_paths)}):")
         for i, path in enumerate(overlay_paths, 1):
+            print(f"  {i}. {path}")
+    if thumbnail_paths:
+        print(f"Thumbnail paths ({len(thumbnail_paths)}):")
+        for i, path in enumerate(thumbnail_paths, 1):
             print(f"  {i}. {path}")
     print(f"Default session: http://localhost:{PORT}/{default_session.token}/")
     print(f"Create new sessions: POST http://localhost:{PORT}/api/sessions")

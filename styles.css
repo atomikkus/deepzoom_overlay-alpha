@@ -115,7 +115,7 @@ body {
    ======================================== */
 
 .sidebar {
-    width: 350px;
+    width: 420px;
     background: var(--bg-secondary);
     border-right: 1px solid var(--border-color);
     padding: var(--spacing-lg);
@@ -143,14 +143,14 @@ body {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-lg);
-    padding: var(--spacing-md);
+    padding: var(--spacing-sm);
     box-shadow: var(--shadow-sm);
 }
 
 .section-title {
-    font-size: 1.125rem;
+    font-size: 0.9375rem;
     font-weight: 600;
-    margin-bottom: var(--spacing-md);
+    margin-bottom: var(--spacing-sm);
     color: var(--text-primary);
 }
 
@@ -392,8 +392,8 @@ body {
 .empty-state {
     text-align: center;
     color: var(--text-muted);
-    padding: var(--spacing-lg);
-    font-size: 0.875rem;
+    padding: var(--spacing-md);
+    font-size: 0.8125rem;
 }
 
 .slide-item {
@@ -405,6 +405,7 @@ body {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    min-width: 0;
 }
 
 .slide-item:hover {
@@ -423,17 +424,59 @@ body {
     flex: 1;
     cursor: pointer;
     padding: var(--spacing-xs);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    min-width: 0;
+}
+
+.slide-item-thumb {
+    flex-shrink: 0;
+    width: 76px;
+    height: 52px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.slide-thumb-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.slide-thumb-placeholder {
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+}
+
+.slide-thumb-placeholder svg {
+    width: 28px;
+    height: 28px;
+}
+
+.slide-item-content {
+    min-width: 0;
+    flex: 1;
 }
 
 .slide-name {
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: 0.25rem;
-    font-size: 0.875rem;
+    margin-bottom: 0.2rem;
+    font-size: 0.8125rem;
+    word-break: break-word;
 }
 
 .slide-status {
-    font-size: 0.75rem;
+    font-size: 0.6875rem;
     color: var(--text-muted);
     display: flex;
     align-items: center;
@@ -441,21 +484,23 @@ body {
 }
 
 .density-toggle-btn {
+    flex-shrink: 0;
+    align-self: center;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
-    padding: 0.25rem 0.625rem;
-    display: flex;
+    padding: 0.35rem 0.75rem;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
     transition: all var(--transition-base);
-    font-size: 11px;
+    font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.5px;
     color: var(--text-secondary);
     flex-shrink: 0;
-    min-width: 45px;
+    min-width: 52px;
 }
 
 .density-toggle-btn:hover {

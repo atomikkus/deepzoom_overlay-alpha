@@ -142,23 +142,29 @@ function renderSlidesList() {
         return;
     }
 
-    slidesList.innerHTML = slides.map(slide => `
+    slidesList.innerHTML = slides.map(slide => {
+        const thumbUrl = slide.thumbnail
+            ? (slide.thumbnail.startsWith('http') ? slide.thumbnail : (window.location.origin + (slide.thumbnail.startsWith('/') ? slide.thumbnail : '/' + slide.thumbnail)))
+            : '';
+        const safeName = (slide.name || '').replace(/"/g, '&quot;');
+        return `
         <div class="slide-item ${currentSlide === slide.name ? 'active' : ''}">
             <div class="slide-item-main" onclick="loadSlide('${slide.name}')">
-                <div class="slide-name">${slide.name}</div>
-                <div class="slide-status">
-                    ${slide.viewable ? 'Ready to view' : 'Loading...'}
+                <div class="slide-item-thumb">
+                    <img src="${thumbUrl || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'}" alt="" class="slide-thumb-img" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+                    <div class="slide-thumb-placeholder" style="display: ${thumbUrl ? 'none' : 'flex'};" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                    </div>
+                </div>
+                <div class="slide-item-content">
+                    <div class="slide-name" title="${safeName}">${slide.name}</div>
+                    <div class="slide-status">${slide.viewable ? 'Ready to view' : 'Loading...'}</div>
                 </div>
             </div>
-            <button class="density-toggle-btn" 
-                    id="density-btn-${slide.name}" 
-                    onclick="event.stopPropagation(); toggleDensityOverlay('${slide.name}')"
-                    style="display: flex;"
-                    title="Toggle Tumor Cell Annotation overlay">
-                TCA
-            </button>
+            <button class="density-toggle-btn" type="button" id="density-btn-${slide.name}" onclick="event.stopPropagation(); toggleDensityOverlay('${slide.name}')" title="Toggle Tumor Cell Annotation overlay">TCA</button>
         </div>
-    `).join('');
+    `;
+    }).join('');
     
     console.log(`Rendered ${slides.length} slides, checking overlay availability...`);
     

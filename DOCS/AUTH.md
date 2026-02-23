@@ -2,14 +2,17 @@
 
 ## Overview
 
-The WSI Viewer uses **HTTP Basic Authentication** (FastAPI Security) to protect **all** endpoints:
-- Session management (create, delete, list, heartbeat)
-- Viewer UI and static assets (`/{token}/`, CSS, JS)
-- Slide listing, metadata, raw slide streaming
-- Overlay config and overlay files
-- GCS proxy, download, signed URLs
+The WSI Viewer uses **HTTP Basic Authentication** only for **global API** endpoints. Session viewer access uses the **session token in the URL** as the credential; no password is required to open a shared viewer link.
 
-Unauthenticated requests receive `401 Unauthorized` with `WWW-Authenticate: Basic`; the browser will prompt for username and password.
+**Protected (auth required):**
+- Session management: create, delete, list, heartbeat (`POST /api/sessions`, `GET /api/sessions`, `DELETE /api/sessions/{token}`, heartbeat)
+- All GCS endpoints: download, proxy, list files, signed URL
+
+**Unprotected (token in URL is enough):**
+- Viewer page and assets: `/{token}/`, `/{token}/styles.css`, `/{token}/viewer.js`
+- Session-scoped API: list slides, slide info, overlay config/files, raw slide streaming, upload, delete slide
+
+Share a link like `https://your-host/{token}/` and the recipient can view without a password. Use auth when creating sessions or calling GCS from your backend.
 
 ## Quick Start
 
@@ -44,12 +47,15 @@ AUTH_PASSWORD=your-secure-password
 
 ### Browser
 
-Open the viewer URL (e.g. `http://localhost:8511/{token}/`). The browser will prompt for username and password. After login, all requests (slides, tiles, overlays) send credentials automatically.
+- **Viewer:** Open `http://localhost:8511/{token}/` — no login prompt. The session token in the URL is the only credential.
+- **Creating sessions:** Use a backend or script that calls `POST /api/sessions` with Basic Auth (see cURL below).
 
 ### cURL Examples
 
+Auth is required only for global API (sessions, GCS). Session URLs work without `-u`.
+
 ```bash
-# Create a new session
+# Create a new session (auth required)
 curl -u satya@4basecare.com:satya123 -X POST http://localhost:8511/api/sessions \
   -H "Content-Type: application/json" \
   -d '{
@@ -57,13 +63,13 @@ curl -u satya@4basecare.com:satya123 -X POST http://localhost:8511/api/sessions 
     "overlay": ["/path/to/overlays"]
   }'
 
-# Delete a session
+# Delete a session (auth required)
 curl -u satya@4basecare.com:satya123 -X DELETE http://localhost:8511/api/sessions/{token}
 
-# List slides in a session
-curl -u satya@4basecare.com:satya123 "http://localhost:8511/{token}/api/slides"
+# List slides in a session (no auth — token in URL is enough)
+curl "http://localhost:8511/{token}/api/slides"
 
-# Download GCS file
+# Download GCS file (auth required)
 curl -u satya@4basecare.com:satya123 -X POST "http://localhost:8511/api/gcs/download?blob_path=path/to/file.svs"
 ```
 
