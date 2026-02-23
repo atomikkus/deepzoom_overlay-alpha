@@ -5,7 +5,11 @@ Each session has its own slides directory, overlay, and converter.
 """
 
 import os
+import zipfile
+import tempfile
+import shutil
 import argparse
+import urllib.request
 from pathlib import Path
 from typing import Optional, Tuple, List
 from datetime import datetime
@@ -14,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
-from session_manager import SessionManager, ALLOWED_EXTENSIONS, is_gcs_path
+from session_manager import SessionManager, ALLOWED_EXTENSIONS, is_gcs_path, is_url, is_zip_path
 
 
 # Google Cloud Storage imports
@@ -48,7 +52,7 @@ parser.add_argument("--slides", type=str, nargs='*', default=None,
 parser.add_argument("--slides-local", type=str, nargs='*', default=None,
                     help="One or more local paths to slides")
 parser.add_argument("--overlay", type=str, nargs='*', default=None,
-                    help="One or more overlay directories (searched in order)")
+                    help="Overlay sources: local directory, local .zip, or http(s) URL to a .zip (e.g. signed URL)")
 parser.add_argument("--session-ttl", type=int, default=30,
                     help="Session TTL in minutes (default: 30)")
 args, unknown = parser.parse_known_args()
@@ -836,10 +840,75 @@ async def serve_raw_slide(token: str, filename: str, request: Request, _: str = 
         raise HTTPException(status_code=500, detail=f"Failed to serve file: {str(e)}")
 
 
+def _extract_zip_to_tempdir(zip_source: str) -> str:
+    """
+    Download (if URL) and extract a .zip archive to a new temp directory.
+    Returns the path to the extracted temp directory.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="wsi_overlay_")
+    try:
+        if is_url(zip_source):
+            # Download to a temp file first
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_zip:
+                tmp_zip_path = tmp_zip.name
+            try:
+                urllib.request.urlretrieve(zip_source, tmp_zip_path)
+                with zipfile.ZipFile(tmp_zip_path, 'r') as zf:
+                    zf.extractall(tmp_dir)
+            finally:
+                os.unlink(tmp_zip_path)
+        else:
+            # Local zip file
+            with zipfile.ZipFile(zip_source, 'r') as zf:
+                zf.extractall(tmp_dir)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    return tmp_dir
+
+
+async def resolve_overlay_zip(session) -> None:
+    """
+    For any overlay_path that is a URL or local .zip, download and extract once.
+    Extracted files land in a single temp directory stored on session.overlay_extracted_dir.
+    No-op if already resolved.
+    """
+    if session.overlay_extracted_dir:
+        return  # Already resolved
+
+    zip_sources = [
+        p for p in session.overlay_paths
+        if is_zip_path(p) or (is_url(p) and not is_gcs_path(p))
+    ]
+    if not zip_sources:
+        return
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+
+    tmp_dir = tempfile.mkdtemp(prefix="wsi_overlay_")
+    try:
+        for source in zip_sources:
+            extracted = await loop.run_in_executor(None, _extract_zip_to_tempdir, source)
+            # Move all files from this extraction into the shared tmp_dir
+            for item in Path(extracted).rglob("*"):
+                if item.is_file():
+                    dest = Path(tmp_dir) / item.relative_to(extracted)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(item), str(dest))
+            shutil.rmtree(extracted, ignore_errors=True)
+        session.overlay_extracted_dir = tmp_dir
+        print(f"Overlay zip extracted to: {tmp_dir}")
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        print(f"Warning: Failed to extract overlay zip: {e}")
+
+
 @app.get("/{token}/api/overlay-config/{slide_name}")
 async def get_overlay_config(token: str, slide_name: str, _: str = Depends(verify_basic_auth)):
     """Get per-slide overlay configuration."""
     session = get_session_or_404(token)
+    await resolve_overlay_zip(session)
     density = session.find_overlay_file(slide_name, '_density.png')
     metadata = session.find_overlay_file(slide_name, '_metadata.json')
     grid = session.find_overlay_file(slide_name, '_grid.json')
@@ -856,6 +925,7 @@ async def get_overlay_config(token: str, slide_name: str, _: str = Depends(verif
 async def serve_overlay_file(token: str, filename: str, _: str = Depends(verify_basic_auth)):
     """Serve an overlay file from overlay dir or slides dir."""
     session = get_session_or_404(token)
+    await resolve_overlay_zip(session)
     for suffix in ['_density.png', '_metadata.json', '_grid.json']:
         if filename.endswith(suffix):
             slide_name = filename[:-len(suffix)]

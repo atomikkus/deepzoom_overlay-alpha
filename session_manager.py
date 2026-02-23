@@ -5,6 +5,7 @@ slides directory and overlay directory.
 """
 
 import uuid
+import shutil
 import asyncio
 from pathlib import Path
 from datetime import datetime
@@ -29,47 +30,64 @@ def is_gcs_path(path: str) -> bool:
     )
 
 
+def is_url(path: str) -> bool:
+    """Return True if the path is any http/https URL."""
+    p = (path or "").strip().lower()
+    return p.startswith("http://") or p.startswith("https://")
+
+
+def is_zip_path(path: str) -> bool:
+    """Return True if the path/URL points to a zip archive."""
+    return (path or "").strip().lower().endswith(".zip")
+
+
 @dataclass
 class Session:
     """A viewer session with its own slide/overlay configuration."""
     token: str
     slide_paths: List[str]  # List of slide paths (GCS URLs or local paths)
-    overlay_paths: List[str]  # List of overlay directories
+    overlay_paths: List[str]  # Raw overlay paths (dirs, local zips, or zip URLs)
     last_accessed: datetime = field(default_factory=datetime.utcnow)
     created_at: datetime = field(default_factory=datetime.utcnow)
+    # Populated after zip download+extraction; used by find_overlay_file
+    overlay_extracted_dir: Optional[str] = field(default=None)
 
     def touch(self):
         self.last_accessed = datetime.utcnow()
 
     def find_overlay_file(self, slide_name: str, suffix: str) -> Optional[str]:
-        """Find overlay file: search all overlay paths in order."""
+        """Find overlay file: check extracted zip dir first, then plain directories."""
         target = f"{slide_name}{suffix}"
-        
-        # Search all overlay directories
+
+        # 1. Check the extracted zip directory (highest priority)
+        if self.overlay_extracted_dir:
+            path = Path(self.overlay_extracted_dir) / target
+            if path.exists():
+                return str(path)
+
+        # 2. Search static overlay directories (skip URLs / zip paths)
         for overlay_path in self.overlay_paths:
-            if is_gcs_path(overlay_path):
-                # GCS overlay not yet supported, skip for now
-                continue
-            else:
-                # Check local path
-                path = Path(overlay_path) / target
-                if path.exists():
-                    return str(path)
-        
-        # Also check in each slide directory
+            if is_gcs_path(overlay_path) or is_url(overlay_path) or is_zip_path(overlay_path):
+                continue  # These are resolved via overlay_extracted_dir
+            path = Path(overlay_path) / target
+            if path.exists():
+                return str(path)
+
+        # 3. Fall back to slide directories
         for slide_path in self.slide_paths:
             if not is_gcs_path(slide_path):
-                # For local paths, check if it's a directory or file
                 p = Path(slide_path)
-                if p.is_dir():
-                    check_path = p / target
-                else:
-                    check_path = p.parent / target
-                
+                check_path = p / target if p.is_dir() else p.parent / target
                 if check_path.exists():
                     return str(check_path)
-        
+
         return None
+
+    def cleanup_extracted(self):
+        """Remove the temp directory created during zip extraction."""
+        if self.overlay_extracted_dir and Path(self.overlay_extracted_dir).exists():
+            shutil.rmtree(self.overlay_extracted_dir, ignore_errors=True)
+            self.overlay_extracted_dir = None
 
 
 class SessionManager:
@@ -102,18 +120,24 @@ class SessionManager:
                 else:
                     print(f"Warning: Slide path does not exist: {path}")
         
-        # Normalize overlay paths (local only for now)
+        # Normalize overlay paths
         normalized_overlay_paths = []
         for path in overlay_paths:
-            if is_gcs_path(path):
-                # GCS overlays not yet supported, but keep for future
+            path = path.strip()
+            if is_url(path):
+                # http/https URL (e.g. signed URL to a .zip): keep as-is, resolved later
+                normalized_overlay_paths.append(path)
+            elif is_gcs_path(path):
                 normalized_overlay_paths.append(path)
             else:
                 p = Path(path)
                 if p.is_dir():
                     normalized_overlay_paths.append(str(p.resolve()))
+                elif p.is_file() and is_zip_path(path):
+                    # Local zip archive: keep resolved absolute path
+                    normalized_overlay_paths.append(str(p.resolve()))
                 else:
-                    print(f"Warning: Overlay path does not exist or is not a directory: {path}")
+                    print(f"Warning: Overlay path does not exist or is not a directory/zip: {path}")
 
         session = Session(
             token=token,
@@ -135,7 +159,8 @@ class SessionManager:
 
     def delete_session(self, token: str) -> bool:
         if token in self.sessions:
-            del self.sessions[token]
+            session = self.sessions.pop(token)
+            session.cleanup_extracted()
             print(f"✗ Session deleted: {token}")
             return True
         return False
@@ -147,7 +172,7 @@ class SessionManager:
             if (now - s.last_accessed).total_seconds() > self.ttl_minutes * 60
         ]
         for t in expired:
-            print(f"⏰ Session expired (idle {self.ttl_minutes}min): {t}")
+            print(f"Session expired (idle {self.ttl_minutes}min): {t}")
             self.delete_session(t)
         return len(expired)
 
