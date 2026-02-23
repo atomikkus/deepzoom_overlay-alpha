@@ -238,7 +238,7 @@ async function loadSlide(slideName) {
             updateLabelOverlay();
         }
 
-        showToast('Slide loaded', 'success');
+        showToast('Slide loading...', 'success');
 
     } catch (error) {
         console.error('Load slide error:', error);
