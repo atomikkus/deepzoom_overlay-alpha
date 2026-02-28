@@ -6,6 +6,7 @@ Each session has its own slides directory, overlay, and converter.
 
 import os
 import asyncio
+import json
 import zipfile
 import tempfile
 import shutil
@@ -318,6 +319,7 @@ class CreateSessionRequest(BaseModel):
     slides: List[str]  # List of slide paths (GCS or local)
     overlay: Optional[List[str]] = None  # Overlay dirs/zips/URLs
     thumbnail: Optional[List[str]] = None  # Thumbnail dirs/zips/URLs or GCS prefix
+    metadata: Optional[dict] = None  # Optional slide metadata: width, height, mpp, objective_power, vendor, thumbnail_url (for scale/physical units)
 
 
 @app.post("/api/sessions")
@@ -330,13 +332,14 @@ async def create_session(req: CreateSessionRequest, _: str = Depends(verify_basi
     
     overlay_paths = req.overlay if req.overlay else []
     thumb_paths = req.thumbnail if req.thumbnail else []
-    session = session_mgr.create_session(req.slides, overlay_paths, thumbnail_paths=thumb_paths)
+    session = session_mgr.create_session(req.slides, overlay_paths, thumbnail_paths=thumb_paths, metadata=req.metadata)
     return {
         "token": session.token,
         "url": f"/{session.token}/",
         "slide_paths": session.slide_paths,
         "overlay_paths": session.overlay_paths,
         "thumbnail_paths": session.thumbnail_paths,
+        "metadata": session.metadata,
     }
 
 
@@ -367,6 +370,7 @@ async def list_sessions(_: str = Depends(verify_basic_auth)):
                 "slide_paths": s.slide_paths,
                 "overlay_paths": s.overlay_paths,
                 "thumbnail_paths": s.thumbnail_paths,
+                "metadata": s.metadata,
                 "created_at": s.created_at.isoformat(),
                 "last_accessed": s.last_accessed.isoformat(),
             }
@@ -1108,20 +1112,53 @@ async def serve_thumbnail(token: str, slide_name: str):
 
 @app.get("/{token}/api/overlay-config/{slide_name}")
 async def get_overlay_config(token: str, slide_name: str):
-    """Get per-slide overlay configuration."""
+    """Get per-slide overlay configuration. Includes slide_metadata for scale (mpp, etc.) when metadata.json exists."""
     session = get_session_or_404(token)
     await resolve_overlay_zip(session)
     density = session.find_overlay_file(slide_name, '_density.png')
-    metadata = session.find_overlay_file(slide_name, '_metadata.json')
+    metadata_path = session.find_overlay_file(slide_name, '_metadata.json')
     grid = session.find_overlay_file(slide_name, '_grid.json')
     thumb = session.find_thumbnail(slide_name)
-    available = density is not None and metadata is not None
+    available = density is not None and metadata_path is not None
+
+    thumbnail_url = f"/{token}/api/thumbnail/{slide_name}" if thumb else None
+    metadata_url = f"/{token}/api/overlay-file/{slide_name}_metadata.json" if metadata_path else None
+
+    # slide_metadata for scale (mpp → physical units). From overlay metadata.json and/or session.metadata (create session).
+    # Expected keys: width, height, mpp, objective_power, vendor, thumbnail_url (all optional).
+    slide_metadata = None
+    if metadata_path:
+        try:
+            raw = Path(metadata_path).read_text(encoding='utf-8')
+            data = json.loads(raw)
+            slide_metadata = {
+                "width": data.get("width"),
+                "height": data.get("height"),
+                "mpp": data.get("mpp"),
+                "objective_power": data.get("objective_power"),
+                "vendor": data.get("vendor"),
+                "thumbnail_url": thumbnail_url,
+            }
+        except Exception:
+            slide_metadata = {"thumbnail_url": thumbnail_url}
+    if session.metadata and isinstance(session.metadata, dict):
+        base = dict(session.metadata)
+        base.setdefault("thumbnail_url", thumbnail_url)
+        if slide_metadata:
+            for k in ("width", "height", "mpp", "objective_power", "vendor"):
+                if slide_metadata.get(k) is not None:
+                    base[k] = slide_metadata[k]
+            slide_metadata = base
+        else:
+            slide_metadata = base
+
     return {
         "available": available,
         "density_image": f"/{token}/api/overlay-file/{slide_name}_density.png" if density else None,
-        "metadata": f"/{token}/api/overlay-file/{slide_name}_metadata.json" if metadata else None,
+        "metadata": metadata_url,
         "grid": f"/{token}/api/overlay-file/{slide_name}_grid.json" if grid else None,
-        "thumbnail": f"/{token}/api/thumbnail/{slide_name}" if thumb else None,
+        "thumbnail": thumbnail_url,
+        "slide_metadata": slide_metadata,
     }
 
 

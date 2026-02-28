@@ -70,6 +70,7 @@ class Session:
     # Populated after zip download+extraction; used by find_overlay_file
     overlay_extracted_dir: Optional[str] = field(default=None)
     thumbnail_extracted_dir: Optional[str] = field(default=None)
+    metadata: Optional[Dict] = field(default=None)  # Optional: width, height, mpp, objective_power, vendor, thumbnail_url
 
     def touch(self):
         self.last_accessed = datetime.utcnow()
@@ -168,6 +169,7 @@ class SessionManager:
         slide_paths: List[str],
         overlay_paths: List[str] = None,
         thumbnail_paths: List[str] = None,
+        metadata: Optional[Dict] = None,
     ) -> Session:
         token = str(uuid.uuid4())
 
@@ -233,6 +235,7 @@ class SessionManager:
             slide_paths=normalized_slide_paths,
             overlay_paths=normalized_overlay_paths,
             thumbnail_paths=normalized_thumbnail_paths,
+            metadata=metadata,
         )
         self.sessions[token] = session
 

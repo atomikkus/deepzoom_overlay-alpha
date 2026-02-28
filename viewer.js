@@ -25,6 +25,11 @@ let polygonSvgOverlay = null;
 let labels = [];
 let labelSvgOverlay = null;
 
+// Measure tool state (two points per measure, distance in viewport units; pixel distance computed at draw time)
+let measureMode = false;
+let currentMeasure = null; // null | { p1: { x, y } }
+let measures = [];
+
 
 // API base URL - derived from the session token in the URL path
 // e.g., if URL is /a8f3k2x9/, API_BASE becomes /a8f3k2x9
@@ -107,6 +112,9 @@ function initializeEventListeners() {
 
     const clearPolygonsBtn = document.getElementById('clear-polygons-btn');
     if (clearPolygonsBtn) clearPolygonsBtn.addEventListener('click', clearAllPolygons);
+
+    const measureBtn = document.getElementById('measure-btn');
+    if (measureBtn) measureBtn.addEventListener('click', toggleMeasureMode);
 }
 
 // ========================================
@@ -196,7 +204,8 @@ async function convertSlide(slideName) {
 async function loadSlide(slideName) {
     try {
         currentSlide = slideName;
-        
+        currentMeasure = null; // cancel in-progress measure when switching slides
+
         // Clear any existing overlay pages
         const existingOverlays = document.querySelectorAll('.slide-overlay-container');
         existingOverlays.forEach(el => el.remove());
@@ -230,7 +239,7 @@ async function loadSlide(slideName) {
         // Load overlay config for current slide
         await loadOverlayConfigForSlide(slideName);
         
-        // Update polygon and label overlays for current slide
+        // Update polygon, label, and measure overlays for current slide
         if (polygonSvgOverlay) {
             updatePolygonOverlay();
         }
@@ -589,15 +598,21 @@ async function loadOverlayConfigForSlide(slideName) {
         if (!configResponse.ok) {
             console.log('No overlay config available for current slide');
             window._overlayConfig = null;
+            window._slideMetadata = null;
             return;
         }
+        // Note: even when config.available is false (no overlay files),
+        // the response still contains slide_metadata from the session if provided at create time.
 
         const config = await configResponse.json();
+        // Always store slide_metadata (set at session creation) regardless of overlay availability
+        window._slideMetadata = config.slide_metadata || null;
+        if (config.slide_metadata) {
+            console.log('Slide metadata loaded for scale:', config.slide_metadata);
+        }
         if (config.available) {
             window._overlayConfig = config;
-            console.log('Overlay config loaded for current slide');
-            
-            // Show the button for this slide
+            // Show the density button for this slide
             const densityBtn = document.getElementById(`density-btn-${slideName}`);
             if (densityBtn) {
                 densityBtn.style.display = 'flex';
@@ -608,6 +623,7 @@ async function loadOverlayConfigForSlide(slideName) {
     } catch (error) {
         console.log('Could not load overlay config:', error.message);
         window._overlayConfig = null;
+        window._slideMetadata = null;
     }
 }
 
@@ -850,6 +866,7 @@ function toggleDrawingMode() {
     // Can't be in multiple modes at once
     if (deleteMode) toggleDeleteMode();
     if (labelMode) toggleLabelMode();
+    if (measureMode) toggleMeasureMode();
 
     drawingMode = !drawingMode;
     const btn = document.getElementById('draw-polygon-btn');
@@ -927,6 +944,11 @@ function initializePolygonOverlay() {
     const g = document.createElementNS(svgNS, "g");
     g.setAttribute("id", "polygons-group");
     svg.appendChild(g);
+
+    // Create group for measure lines
+    const measuresGroup = document.createElementNS(svgNS, "g");
+    measuresGroup.setAttribute("id", "measures-group");
+    svg.appendChild(measuresGroup);
 
     // Add to viewer
     const viewerElement = document.getElementById('viewer-container');
@@ -1012,6 +1034,28 @@ function updatePolygonOverlay() {
     if (currentPolygon.length > 0) {
         const currentPolyElement = createPolygonSvgElement(currentPolygon, -1, true);
         if (currentPolyElement) g.appendChild(currentPolyElement);
+    }
+
+    // Draw measures for current slide
+    const measuresGroup = polygonSvgOverlay.querySelector('#measures-group');
+    if (measuresGroup) {
+        measuresGroup.innerHTML = '';
+        const slideMeasures = measures.filter(m => m.slide === currentSlide);
+        slideMeasures.forEach(measure => {
+            const el = createMeasureSvgElement(measure);
+            if (el) measuresGroup.appendChild(el);
+        });
+        if (currentMeasure && currentMeasure.p1) {
+            const pt = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(currentMeasure.p1.x, currentMeasure.p1.y));
+            const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            circle.setAttribute('cx', pt.x);
+            circle.setAttribute('cy', pt.y);
+            circle.setAttribute('r', '6');
+            circle.setAttribute('fill', 'rgba(255, 200, 0, 0.5)');
+            circle.setAttribute('stroke', '#ffcc00');
+            circle.setAttribute('stroke-width', '2');
+            measuresGroup.appendChild(circle);
+        }
     }
 }
 
@@ -1149,6 +1193,96 @@ function calculateCentroid(points) {
     };
 }
 
+function createMeasureSvgElement(measure) {
+    const svgNS = "http://www.w3.org/2000/svg";
+    const g = document.createElementNS(svgNS, "g");
+
+    const pixel1 = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(measure.p1.x, measure.p1.y));
+    const pixel2 = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(measure.p2.x, measure.p2.y));
+    const { distancePx, distanceUm } = getMeasureDistanceInImageUnits(measure.p1, measure.p2);
+    const labelText = distanceUm != null
+        ? `${distanceUm.toFixed(2)} μm`
+        : `${Math.round(distancePx)} px`;
+    const midX = (pixel1.x + pixel2.x) / 2;
+    const midY = (pixel1.y + pixel2.y) / 2;
+
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", pixel1.x);
+    line.setAttribute("y1", pixel1.y);
+    line.setAttribute("x2", pixel2.x);
+    line.setAttribute("y2", pixel2.y);
+    line.setAttribute("stroke", deleteMode ? "#ff0000" : "#00aa44");
+    line.setAttribute("stroke-width", "2");
+    line.setAttribute("stroke-linecap", "round");
+    g.appendChild(line);
+
+    const text = document.createElementNS(svgNS, "text");
+    text.setAttribute("x", midX);
+    text.setAttribute("y", midY);
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("dominant-baseline", "middle");
+    text.setAttribute("fill", "white");
+    text.setAttribute("font-size", "13px");
+    text.setAttribute("font-weight", "bold");
+    text.setAttribute("stroke", deleteMode ? "#660000" : "#004422");
+    text.setAttribute("stroke-width", "2");
+    text.setAttribute("paint-order", "stroke");
+    text.textContent = labelText;
+    g.appendChild(text);
+
+    const bg = document.createElementNS(svgNS, "rect");
+    const tw = (labelText.length * 7.5) + 8;
+    const th = 18;
+    bg.setAttribute("x", midX - tw / 2);
+    bg.setAttribute("y", midY - th / 2);
+    bg.setAttribute("width", tw);
+    bg.setAttribute("height", th);
+    bg.setAttribute("rx", "4");
+    bg.setAttribute("ry", "4");
+    bg.setAttribute("fill", deleteMode ? "rgba(255,0,0,0.85)" : "rgba(0,100,60,0.9)");
+    bg.setAttribute("stroke", "white");
+    bg.setAttribute("stroke-width", "1");
+    g.insertBefore(bg, text);
+    return g;
+}
+
+/**
+ * Get distance between two viewport points in image pixels and (if mpp available) in microns.
+ * Returns { distancePx, distanceUm } where distancePx is image pixels, distanceUm is set when slide_metadata.mpp exists.
+ */
+function getMeasureDistanceInImageUnits(p1, p2) {
+    let distancePx = 0;
+    let distanceUm = null;
+    if (!viewer) return { distancePx: 0, distanceUm: null };
+    try {
+        if (typeof viewer.viewport.viewportToImageCoordinates === 'function') {
+            const img1 = viewer.viewport.viewportToImageCoordinates(new OpenSeadragon.Point(p1.x, p1.y));
+            const img2 = viewer.viewport.viewportToImageCoordinates(new OpenSeadragon.Point(p2.x, p2.y));
+            const imagePx = Math.sqrt(Math.pow(img2.x - img1.x, 2) + Math.pow(img2.y - img1.y, 2));
+            distancePx = imagePx;
+            const meta = window._slideMetadata;
+            if (meta && typeof meta.mpp === 'number' && meta.mpp > 0) {
+                distanceUm = imagePx * meta.mpp;
+            }
+        }
+    } catch (e) {
+        console.warn('getMeasureDistanceInImageUnits:', e);
+    }
+    return { distancePx, distanceUm };
+}
+
+function distanceFromPointToSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return Math.sqrt((px - x1) ** 2 + (py - y1) ** 2);
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const nearestX = x1 + t * dx;
+    const nearestY = y1 + t * dy;
+    return Math.sqrt((px - nearestX) ** 2 + (py - nearestY) ** 2);
+}
+
 function toggleLabelMode() {
     if (!viewer) {
         showToast('Please load a slide first', 'error');
@@ -1158,6 +1292,7 @@ function toggleLabelMode() {
     // Can't be in multiple modes at once
     if (drawingMode) toggleDrawingMode();
     if (deleteMode) toggleDeleteMode();
+    if (measureMode) toggleMeasureMode();
 
     labelMode = !labelMode;
     const btn = document.getElementById('label-polygon-btn');
@@ -1200,6 +1335,7 @@ function toggleDeleteMode() {
     // Can't be in multiple modes at once
     if (drawingMode) toggleDrawingMode();
     if (labelMode) toggleLabelMode();
+    if (measureMode) toggleMeasureMode();
 
     deleteMode = !deleteMode;
     const btn = document.getElementById('delete-polygon-btn');
@@ -1231,6 +1367,73 @@ function toggleDeleteMode() {
         
         showToast('Delete mode disabled', 'info');
     }
+}
+
+function toggleMeasureMode() {
+    if (!viewer) {
+        showToast('Please load a slide first', 'error');
+        return;
+    }
+
+    if (drawingMode) toggleDrawingMode();
+    if (labelMode) toggleLabelMode();
+    if (deleteMode) toggleDeleteMode();
+
+    measureMode = !measureMode;
+    const btn = document.getElementById('measure-btn');
+
+    if (measureMode) {
+        btn.classList.add('active');
+        btn.title = 'Click first point, then second point';
+        showToast('Measure: Click two points for distance', 'info');
+
+        if (!polygonSvgOverlay) {
+            initializePolygonOverlay();
+        }
+
+        currentMeasure = null;
+        viewer.addHandler('canvas-click', handleMeasureClick);
+        document.getElementById('viewer-container').style.cursor = 'crosshair';
+    } else {
+        btn.classList.remove('active');
+        btn.title = 'Measure Distance';
+        viewer.removeHandler('canvas-click', handleMeasureClick);
+        document.getElementById('viewer-container').style.cursor = 'default';
+        if (currentMeasure) {
+            currentMeasure = null;
+            showToast('Measure cancelled', 'info');
+        }
+        updatePolygonOverlay();
+    }
+}
+
+function handleMeasureClick(event) {
+    if (!measureMode) return;
+    event.preventDefaultAction = true;
+
+    const viewportPoint = viewer.viewport.pointFromPixel(event.position);
+
+    if (currentMeasure === null) {
+        currentMeasure = { p1: { x: viewportPoint.x, y: viewportPoint.y } };
+        showToast('First point set. Click second point.', 'info');
+    } else {
+        const p2 = { x: viewportPoint.x, y: viewportPoint.y };
+        const { distancePx, distanceUm } = getMeasureDistanceInImageUnits(currentMeasure.p1, p2);
+        const msg = distanceUm != null
+            ? `Distance: ${distanceUm.toFixed(2)} μm (${distancePx.toFixed(0)} px)`
+            : `Distance: ${distancePx.toFixed(0)} px`;
+
+        measures.push({
+            id: Date.now(),
+            p1: { ...currentMeasure.p1 },
+            p2: p2,
+            slide: currentSlide
+        });
+        currentMeasure = null;
+        updatePolygonOverlay();
+        showToast(msg, 'success');
+    }
+    updatePolygonOverlay();
 }
 
 function handlePlaceLabelClick(event) {
@@ -1325,6 +1528,27 @@ function handleDeletePolygonClick(event) {
         }
     }
     
+    // Check if clicked on a measure
+    const slideMeasures = measures.filter(m => m.slide === currentSlide);
+    for (let i = slideMeasures.length - 1; i >= 0; i--) {
+        const measure = slideMeasures[i];
+        const pixel1 = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(measure.p1.x, measure.p1.y));
+        const pixel2 = viewer.viewport.pixelFromPoint(new OpenSeadragon.Point(measure.p2.x, measure.p2.y));
+        const midX = (pixel1.x + pixel2.x) / 2;
+        const midY = (pixel1.y + pixel2.y) / 2;
+        const distToLine = distanceFromPointToSegment(pixel.x, pixel.y, pixel1.x, pixel1.y, pixel2.x, pixel2.y);
+        const distToLabel = Math.sqrt((pixel.x - midX) ** 2 + (pixel.y - midY) ** 2);
+        if (distToLine <= 12 || distToLabel <= 25) {
+            if (confirm('Delete this measure?')) {
+                const globalIndex = measures.indexOf(measure);
+                if (globalIndex > -1) measures.splice(globalIndex, 1);
+                updatePolygonOverlay();
+                showToast('Measure deleted', 'success');
+            }
+            return;
+        }
+    }
+
     // Check if clicked on a polygon
     const slidePolygons = polygons.filter(p => p.slide === currentSlide);
     
@@ -1373,24 +1597,26 @@ function isPointInPolygon(point, polygonPoints) {
 }
 
 function clearAllPolygons() {
-    // Clear all polygons and labels for all slides
-    const totalCount = polygons.length + labels.length;
-    
+    const totalCount = polygons.length + labels.length + measures.length;
     if (totalCount === 0) {
         showToast('No annotations to clear', 'info');
         return;
     }
-
-    const confirmed = confirm(`Delete all ${polygons.length} polygon${polygons.length !== 1 ? 's' : ''} and ${labels.length} label${labels.length !== 1 ? 's' : ''}?`);
+    const parts = [];
+    if (polygons.length) parts.push(`${polygons.length} polygon${polygons.length !== 1 ? 's' : ''}`);
+    if (labels.length) parts.push(`${labels.length} label${labels.length !== 1 ? 's' : ''}`);
+    if (measures.length) parts.push(`${measures.length} measure${measures.length !== 1 ? 's' : ''}`);
+    const confirmed = confirm(`Delete all ${parts.join(', ')}?`);
     if (!confirmed) return;
 
     polygons = [];
     currentPolygon = [];
     labels = [];
-    
+    measures = [];
+    currentMeasure = null;
+
     updatePolygonOverlay();
     updateLabelOverlay();
-    
     showToast('All annotations cleared', 'success');
 }
 
@@ -1746,17 +1972,18 @@ function drawSvgToCanvas(svgElement, ctx, width, height) {
 document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
         if (drawingMode) {
-            // Cancel current polygon
             currentPolygon = [];
             updatePolygonOverlay();
             toggleDrawingMode();
             showToast('Polygon drawing cancelled', 'info');
         } else if (labelMode) {
-            // Exit label mode
             toggleLabelMode();
         } else if (deleteMode) {
-            // Exit delete mode
             toggleDeleteMode();
+        } else if (measureMode) {
+            currentMeasure = null;
+            toggleMeasureMode();
+            showToast('Measure cancelled', 'info');
         }
     }
 });
