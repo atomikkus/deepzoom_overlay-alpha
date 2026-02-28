@@ -1,0 +1,22 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+<foreignObject x="-2" y="-2" width="40" height="40"><div xmlns="http://www.w3.org/1999/xhtml" style="backdrop-filter:blur(2px);clip-path:url(#bgblur_0_4410_5840_clip_path);height:100%;width:100%"></div></foreignObject><g filter="url(#filter0_d_4410_5840)" data-figma-bg-blur-radius="4">
+<rect x="2" y="2" width="32" height="32" rx="8" fill="#F9F9F9" fill-opacity="0.4" shape-rendering="crispEdges"/>
+<path d="M24.3428 18.4444C25.2096 17.7802 25.3834 16.5435 24.7332 15.6661L21.7442 11.6328C21.079 10.7353 19.8076 10.5567 18.9209 11.2361L13.1094 15.6892L18.6895 22.6945L20.0907 21.7027L24.3428 18.4444Z" stroke="#1A4FBA" stroke-width="1.2" stroke-linejoin="round"/>
+<path d="M18.6895 22.6946L17.0866 24.0001L12.6764 23.9997L11.5909 22.535L10.0769 20.4921C9.42664 19.6148 9.60041 18.378 10.4673 17.7138L13.2618 15.5725" fill="#1A4FBA" fill-opacity="0.24"/>
+<path d="M18.6895 22.6946L17.0866 24.0001L12.6764 23.9997L11.5909 22.535L10.0769 20.4921C9.42664 19.6148 9.60041 18.378 10.4673 17.7138L13.2618 15.5725" stroke="#1A4FBA" stroke-width="1.2" stroke-linejoin="round"/>
+<path d="M12.7215 23.9988H25.8148" stroke="#1A4FBA" stroke-width="1.2" stroke-linecap="round"/>
+</g>
+<defs>
+<filter id="filter0_d_4410_5840" x="-2" y="-2" width="40" height="40" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset/>
+<feGaussianBlur stdDeviation="1"/>
+<feComposite in2="hardAlpha" operator="out"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0.101961 0 0 0 0 0.309804 0 0 0 0 0.729412 0 0 0 0.4 0"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_4410_5840"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_4410_5840" result="shape"/>
+</filter>
+<clipPath id="bgblur_0_4410_5840_clip_path" transform="translate(2 2)"><rect x="2" y="2" width="32" height="32" rx="8"/>
+</clipPath></defs>
+</svg>
