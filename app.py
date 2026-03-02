@@ -13,7 +13,7 @@ import tempfile
 import shutil
 import argparse
 import urllib.request
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from pathlib import Path
 from typing import Optional, Tuple, List
 from datetime import datetime
@@ -319,6 +319,57 @@ def get_session_or_404(token: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     return session
+
+
+def _wsi_slug(patient_id: str, event_id: str, slide_id: str) -> str:
+    """Internal session key for WSI viewer (no token in URL)."""
+    slug = re.sub(r"[^a-zA-Z0-9\-_]", "_", f"{patient_id}_{event_id}_{slide_id}")
+    return f"pid_{slug}"
+
+
+async def get_or_create_wsi_session(patient_id: str, event_id: str, slide_id: str):
+    """Get existing session or create one from external API for /wsi-viewer?patient_id=&event_id=&selected_slide_id=."""
+    if not _external_api_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="External API not configured. Set base_url, email, password in integrate_config.json or EXTERNAL_API_* env.",
+        )
+    token = _wsi_slug(patient_id, event_id, slide_id)
+    session = session_mgr.get_session(token)
+    if session:
+        return session
+    payload, fetch_err = await _fetch_pathology_images(patient_id, event_id, slide_id)
+    if not payload:
+        raise HTTPException(
+            status_code=502,
+            detail=fetch_err or "Failed to fetch pathology images from external API.",
+        )
+    blocks = payload.get("blocks") or []
+    all_slides_raw = []
+    for block in blocks:
+        for s in block.get("slides") or []:
+            if s.get("slide_url"):
+                all_slides_raw.append(s)
+    if not all_slides_raw:
+        raise HTTPException(status_code=404, detail="No slides found for this patient/event.")
+    selected = (payload.get("selected_slide_id") or slide_id)
+    selected = str(selected).strip() if selected is not None else str(slide_id).strip()
+    rest = [s for s in all_slides_raw if (s.get("slide_id") or "").strip() != selected]
+    first = [s for s in all_slides_raw if (s.get("slide_id") or "").strip() == selected]
+    ordered = first + rest if first else all_slides_raw
+    slide_paths = [s["slide_url"] for s in ordered]
+    overlay_paths = []
+    thumbnail_paths = list({s["thumbnail_url"] for s in ordered if s.get("thumbnail_url")})
+    api_slides = ordered
+    session_mgr.create_session(
+        slide_paths,
+        overlay_paths=overlay_paths,
+        thumbnail_paths=thumbnail_paths,
+        api_slides=api_slides,
+        default_slide_id=selected,
+        token=token,
+    )
+    return session_mgr.get_session(token)
 
 
 def find_file_in_session(session, filename: str):
@@ -638,6 +689,64 @@ async def viewer_logo():
 
 
 # ========================================
+# WSI Viewer: URL-only (no token) /wsi-viewer?patient_id=&event_id=&selected_slide_id=
+# Must be before /{token}/ so path "wsi-viewer" is not captured as token.
+# ========================================
+
+@app.get("/wsi-viewer")
+async def wsi_viewer_redirect(request: Request):
+    """Redirect /wsi-viewer to /wsi-viewer/ so relative asset URLs resolve."""
+    path = "/wsi-viewer/"
+    q = request.url.query
+    return RedirectResponse(url=f"{path}?{q}" if q else path, status_code=302)
+
+
+@app.get("/wsi-viewer/")
+async def wsi_viewer_page(
+    patient_id: str = Query(..., description="Patient ID (uuid)"),
+    event_id: str = Query(..., description="Event ID (row id)"),
+    selected_slide_id: str = Query(..., description="Slide ID"),
+):
+    """Serve the viewer HTML. Session is created or reused keyed by patient_id, event_id, selected_slide_id (no token in URL)."""
+    await get_or_create_wsi_session(patient_id, event_id, selected_slide_id)
+    return FileResponse('index.html')
+
+
+@app.get("/wsi-viewer/styles.css")
+async def wsi_viewer_css():
+    return FileResponse('styles.css', media_type='text/css')
+
+
+@app.get("/wsi-viewer/viewer.js")
+async def wsi_viewer_js():
+    return FileResponse('viewer.js', media_type='application/javascript')
+
+
+@app.get("/wsi-viewer/logo.svg")
+async def wsi_viewer_logo():
+    return FileResponse('logo.svg', media_type='image/svg+xml')
+
+
+def _wsi_query(patient_id: str, event_id: str, selected_slide_id: str) -> str:
+    return urlencode({"patient_id": patient_id, "event_id": event_id, "selected_slide_id": selected_slide_id})
+
+
+def _wsi_url(path: str, patient_id: str, event_id: str, selected_slide_id: str) -> str:
+    """Build /wsi-viewer/api/<path>?patient_id=...&event_id=...&selected_slide_id=..."""
+    return f"/wsi-viewer/api/{path}?{_wsi_query(patient_id, event_id, selected_slide_id)}"
+
+
+async def get_wsi_session_dep(
+    patient_id: str = Query(..., description="Patient ID"),
+    event_id: str = Query(..., description="Event ID"),
+    selected_slide_id: str = Query(..., description="Slide ID"),
+):
+    """Dependency: get or create session for WSI viewer; return (session, patient_id, event_id, selected_slide_id)."""
+    session = await get_or_create_wsi_session(patient_id, event_id, selected_slide_id)
+    return (session, patient_id, event_id, selected_slide_id)
+
+
+# ========================================
 # Session-Scoped: Static Files (path-based /{token}/)
 # ========================================
 
@@ -670,10 +779,12 @@ async def session_logo(token: str):
 # Session-Scoped: Slide API Endpoints
 # ========================================
 
-@app.get("/{token}/api/slides")
-async def list_slides(token: str):
-    """List slides available in this session. Each slide includes a thumbnail URL if available."""
-    session = get_session_or_404(token)
+def _thumb_url_for_token(token: str):
+    return lambda stem: f"/{token}/api/thumbnail/{stem}"
+
+
+async def _list_slides_impl(session, thumb_url):
+    """Shared impl: build slides list with thumbnail URLs from thumb_url(stem)."""
     await resolve_overlay_zip(session)
     try:
         if session.api_slides:
@@ -687,24 +798,16 @@ async def list_slides(token: str):
                 stem = Path(filename).stem
                 if session.default_slide_id and (s.get("slide_id") or "").strip() == str(session.default_slide_id).strip():
                     default_slide_name = stem
-                thumb_url = s.get("thumbnail_url")
-                if not thumb_url:
-                    thumb_url = f"/{token}/api/thumbnail/{stem}"
+                thumb_u = s.get("thumbnail_url") or thumb_url(stem)
                 all_slides.append({
-                    "name": stem,
-                    "filename": filename,
-                    "size": 0,
-                    "viewable": True,
-                    "thumbnail": thumb_url,
+                    "name": stem, "filename": filename, "size": 0, "viewable": True, "thumbnail": thumb_u,
                 })
             out = {"slides": all_slides}
             if default_slide_name is not None:
                 out["default_slide"] = default_slide_name
             return out
-
         all_slides = []
-        seen_filenames = set()  # To deduplicate slides with same filename
-        
+        seen_filenames = set()
         for slide_path in session.slide_paths:
             if is_direct_slide_url(slide_path):
                 filename = url_to_slide_filename(slide_path)
@@ -712,95 +815,56 @@ async def list_slides(token: str):
                     continue
                 stem = Path(filename).stem
                 all_slides.append({
-                    'name': stem,
-                    'filename': filename,
-                    'size': 0,
-                    'viewable': True,
-                    'thumbnail': f"/{token}/api/thumbnail/{stem}",
+                    'name': stem, 'filename': filename, 'size': 0, 'viewable': True, 'thumbnail': thumb_url(stem),
                 })
                 seen_filenames.add(filename)
                 continue
             if is_gcs_path(slide_path):
                 if not GCS_AVAILABLE or gcs_client is None:
-                    print(f"Warning: GCS path specified but GCS not available: {slide_path}")
                     continue
-
                 bucket_name, prefix = parse_gcs_location(slide_path)
                 bucket = gcs_client.bucket(bucket_name)
-                
-                # Check if this is a direct file path or a directory
-                is_single_file = False
-                if prefix:
-                    # Check if it ends with an extension
-                    ext = prefix.rsplit(".", 1)[-1].lower() if "." in prefix else ""
-                    if ext in ALLOWED_EXTENSIONS:
-                        is_single_file = True
-                
+                is_single_file = bool(prefix and prefix.rsplit(".", 1)[-1].lower() in ALLOWED_EXTENSIONS if "." in prefix else False)
                 if is_single_file:
-                    # Handle single file
                     blob = bucket.blob(prefix)
                     if blob.exists():
                         filename = Path(prefix).name
                         if filename not in seen_filenames:
-                            stem = Path(filename).stem
                             all_slides.append({
-                                'name': stem,
-                                'filename': filename,
-                                'size': blob.size or 0,
-                                'viewable': True,
-                                'thumbnail': f"/{token}/api/thumbnail/{stem}",
+                                'name': Path(filename).stem, 'filename': filename, 'size': blob.size or 0,
+                                'viewable': True, 'thumbnail': thumb_url(Path(filename).stem),
                             })
                             seen_filenames.add(filename)
                 else:
-                    # List all files in the directory/prefix
-                    blobs = bucket.list_blobs(prefix=prefix)
-                    for blob in blobs:
+                    for blob in bucket.list_blobs(prefix=prefix):
                         filename = Path(blob.name).name
-                        if not filename or not allowed_file(filename):
+                        if not filename or not allowed_file(filename) or filename in seen_filenames:
                             continue
-                        
-                        if filename not in seen_filenames:
-                            stem = Path(filename).stem
-                            all_slides.append({
-                                'name': stem,
-                                'filename': filename,
-                                'size': blob.size or 0,
-                                'viewable': True,
-                                'thumbnail': f"/{token}/api/thumbnail/{stem}",
-                            })
-                            seen_filenames.add(filename)
-            
+                        stem = Path(filename).stem
+                        all_slides.append({
+                            'name': stem, 'filename': filename, 'size': blob.size or 0,
+                            'viewable': True, 'thumbnail': thumb_url(stem),
+                        })
+                        seen_filenames.add(filename)
             else:
-                # Local path
                 p = Path(slide_path)
                 if not p.exists():
-                    print(f"Warning: Local path does not exist: {slide_path}")
                     continue
-                
                 if p.is_file():
-                    # Single file
                     if allowed_file(p.name) and p.name not in seen_filenames:
                         all_slides.append({
-                            'name': p.stem,
-                            'filename': p.name,
-                            'size': p.stat().st_size,
-                            'viewable': True,
-                            'thumbnail': f"/{token}/api/thumbnail/{p.stem}",
+                            'name': p.stem, 'filename': p.name, 'size': p.stat().st_size,
+                            'viewable': True, 'thumbnail': thumb_url(p.stem),
                         })
                         seen_filenames.add(p.name)
                 else:
-                    # Directory
                     for fp in p.iterdir():
                         if fp.is_file() and allowed_file(fp.name) and fp.name not in seen_filenames:
                             all_slides.append({
-                                'name': fp.stem,
-                                'filename': fp.name,
-                                'size': fp.stat().st_size,
-                                'viewable': True,
-                                'thumbnail': f"/{token}/api/thumbnail/{fp.stem}",
+                                'name': fp.stem, 'filename': fp.name, 'size': fp.stat().st_size,
+                                'viewable': True, 'thumbnail': thumb_url(fp.stem),
                             })
                             seen_filenames.add(fp.name)
-        
         return {"slides": all_slides}
     except HTTPException:
         raise
@@ -808,89 +872,89 @@ async def list_slides(token: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/{token}/api/info/{slide_name}")
-async def get_slide_info(token: str, slide_name: str):
-    """Get metadata for a slide."""
+@app.get("/wsi-viewer/api/slides")
+async def wsi_list_slides(wsi: tuple = Depends(get_wsi_session_dep)):
+    """List slides for WSI viewer (query params: patient_id, event_id, selected_slide_id). Must be before /{token}/api/slides."""
+    session, patient_id, event_id, selected_slide_id = wsi
+    thumb_url = lambda stem: _wsi_url(f"thumbnail/{stem}", patient_id, event_id, selected_slide_id)
+    return await _list_slides_impl(session, thumb_url)
+
+
+@app.get("/{token}/api/slides")
+async def list_slides(token: str):
+    """List slides available in this session. Each slide includes a thumbnail URL if available."""
     session = get_session_or_404(token)
+    return await _list_slides_impl(session, _thumb_url_for_token(token))
+
+
+def _get_slide_info_impl(session, slide_name: str):
+    """Shared impl: get slide metadata by name from session paths."""
     try:
-        # Search all slide paths for this slide
         for slide_path in session.slide_paths:
             if is_direct_slide_url(slide_path):
                 filename = url_to_slide_filename(slide_path)
                 if filename and Path(filename).stem == slide_name:
                     return {
-                        'filename': filename,
-                        'size': 0,
+                        'filename': filename, 'size': 0,
                         'properties': {'slide_source': 'url', 'url': slide_path},
-                        'dimensions': [0, 0],
-                        'level_count': 1,
+                        'dimensions': [0, 0], 'level_count': 1,
                     }
                 continue
             if is_gcs_path(slide_path):
-                # Try GCS
                 try:
                     bucket_name, prefix = parse_gcs_location(slide_path)
                     bucket = gcs_client.bucket(bucket_name)
-                    
-                    # Try to find the slide file
                     for ext in ALLOWED_EXTENSIONS:
                         test_blob_path = join_blob_path(prefix, f"{slide_name}.{ext}")
                         test_blob = bucket.blob(test_blob_path)
                         if test_blob.exists():
                             metadata = get_gcs_slide_metadata(bucket_name, test_blob_path, test_blob)
                             return {
-                                'filename': metadata['filename'],
-                                'size': metadata['size'],
-                                'content_type': metadata['content_type'],
-                                'updated': metadata['updated'],
-                                'properties': {
-                                    'slide_source': 'gcs',
-                                    'bucket': bucket_name,
-                                    'path': test_blob_path
-                                },
-                                'dimensions': [0, 0],
-                                'level_count': 1,
+                                'filename': metadata['filename'], 'size': metadata['size'],
+                                'content_type': metadata['content_type'], 'updated': metadata['updated'],
+                                'properties': {'slide_source': 'gcs', 'bucket': bucket_name, 'path': test_blob_path},
+                                'dimensions': [0, 0], 'level_count': 1,
                             }
                 except Exception as e:
                     print(f"Error checking GCS path {slide_path}: {e}")
                     continue
             else:
-                # Try local path
                 p = Path(slide_path)
                 if p.is_file():
-                    # Single file - check if it matches
                     if p.stem == slide_name:
                         return {
-                            'filename': p.name,
-                            'size': p.stat().st_size,
-                            'properties': {
-                                'slide_source': 'local',
-                                'path': str(p)
-                            },
-                            'dimensions': [0, 0],
-                            'level_count': 1,
+                            'filename': p.name, 'size': p.stat().st_size,
+                            'properties': {'slide_source': 'local', 'path': str(p)},
+                            'dimensions': [0, 0], 'level_count': 1,
                         }
                 else:
-                    # Directory - search for matching file
                     slide_files = list(p.glob(f"{slide_name}.*"))
                     if slide_files:
                         slide_file = slide_files[0]
                         return {
-                            'filename': slide_file.name,
-                            'size': slide_file.stat().st_size,
-                            'properties': {
-                                'slide_source': 'local',
-                                'path': str(slide_file)
-                            },
-                            'dimensions': [0, 0],
-                            'level_count': 1,
+                            'filename': slide_file.name, 'size': slide_file.stat().st_size,
+                            'properties': {'slide_source': 'local', 'path': str(slide_file)},
+                            'dimensions': [0, 0], 'level_count': 1,
                         }
-        
         raise HTTPException(status_code=404, detail="Slide not found in any configured path")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/wsi-viewer/api/info/{slide_name}")
+async def wsi_get_slide_info(slide_name: str, wsi: tuple = Depends(get_wsi_session_dep)):
+    """Get slide info for WSI viewer. Must be before /{token}/api/info/."""
+    session, _, _, _ = wsi
+    return _get_slide_info_impl(session, slide_name)
+
+
+@app.get("/{token}/api/info/{slide_name}")
+async def get_slide_info(token: str, slide_name: str):
+    """Get metadata for a slide."""
+    session = get_session_or_404(token)
+    return _get_slide_info_impl(session, slide_name)
 
 
 @app.post("/{token}/api/upload")
@@ -969,6 +1033,17 @@ async def delete_slide(token: str, slide_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.options("/wsi-viewer/api/raw_slides/{filename:path}")
+async def wsi_options_raw_slide():
+    return Response(status_code=200, headers={
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range, Content-Type, Accept',
+        'Access-Control-Expose-Headers': 'Content-Length, Content-Type, Content-Range, Accept-Ranges',
+        'Access-Control-Max-Age': '3600'
+    })
+
+
 @app.options("/{token}/api/raw_slides/{filename:path}")
 async def options_raw_slide(token: str, filename: str):
     return Response(status_code=200, headers={
@@ -1005,10 +1080,8 @@ def _fetch_url_range(url: str, range_header: Optional[str] = None):
     return status, out_headers, body
 
 
-@app.head("/{token}/api/raw_slides/{filename:path}")
-async def head_raw_slide(token: str, filename: str):
-    """Handle HEAD requests for GeoTIFFTileSource compatibility."""
-    session = get_session_or_404(token)
+async def _head_raw_slide_impl(session, filename: str):
+    """Shared impl: HEAD for raw slide file."""
     try:
         result = find_file_in_session(session, filename)
         is_gcs, location = result[0], result[1]
@@ -1053,10 +1126,21 @@ async def head_raw_slide(token: str, filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/{token}/api/raw_slides/{filename:path}")
-async def serve_raw_slide(token: str, filename: str, request: Request):
-    """Serve raw slide files with range request support (CORS proxy for GCS, direct serve for local)."""
+@app.head("/wsi-viewer/api/raw_slides/{filename:path}")
+async def wsi_head_raw_slide(filename: str, wsi: tuple = Depends(get_wsi_session_dep)):
+    session, _, _, _ = wsi
+    return await _head_raw_slide_impl(session, filename)
+
+
+@app.head("/{token}/api/raw_slides/{filename:path}")
+async def head_raw_slide(token: str, filename: str):
+    """Handle HEAD requests for GeoTIFFTileSource compatibility."""
     session = get_session_or_404(token)
+    return await _head_raw_slide_impl(session, filename)
+
+
+async def _serve_raw_slide_impl(session, filename: str, request: Request):
+    """Shared impl: serve raw slide with range support."""
     try:
         ext = filename.rsplit('.', 1)[-1].lower() if "." in filename else ""
         content_type_map = {
@@ -1232,6 +1316,20 @@ async def serve_raw_slide(token: str, filename: str, request: Request):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to serve file: {str(e)}")
+
+
+@app.get("/wsi-viewer/api/raw_slides/{filename:path}")
+async def wsi_serve_raw_slide(filename: str, request: Request, wsi: tuple = Depends(get_wsi_session_dep)):
+    """Serve raw slide for WSI viewer. Must be before /{token}/api/raw_slides/."""
+    session, _, _, _ = wsi
+    return await _serve_raw_slide_impl(session, filename, request)
+
+
+@app.get("/{token}/api/raw_slides/{filename:path}")
+async def serve_raw_slide(token: str, filename: str, request: Request):
+    """Serve raw slide files with range request support."""
+    session = get_session_or_404(token)
+    return await _serve_raw_slide_impl(session, filename, request)
 
 
 def _extract_zip_to_tempdir(zip_source: str) -> str:
@@ -1413,10 +1511,8 @@ def _stream_thumbnail_from_gcs(session, slide_name: str):
     return None
 
 
-@app.get("/{token}/api/thumbnail/{slide_name}")
-async def serve_thumbnail(token: str, slide_name: str):
-    """Serve thumbnail for a slide from overlay, slide dir, thumbnail_paths (dir/zip/direct URL), or GCS; or from API thumbnail_url when api_slides is set."""
-    session = get_session_or_404(token)
+async def _serve_thumbnail_impl(session, slide_name: str):
+    """Shared impl: serve thumbnail for a slide."""
     if session.api_slides and HTTPX_AVAILABLE:
         for s in session.api_slides:
             url = s.get("slide_url") or ""
@@ -1448,10 +1544,22 @@ async def serve_thumbnail(token: str, slide_name: str):
     raise HTTPException(status_code=404, detail=f"Thumbnail not found for slide: {slide_name}")
 
 
-@app.get("/{token}/api/overlay-config/{slide_name}")
-async def get_overlay_config(token: str, slide_name: str):
-    """Get per-slide overlay configuration. Includes slide_metadata for scale (mpp, etc.) when metadata.json exists."""
+@app.get("/wsi-viewer/api/thumbnail/{slide_name}")
+async def wsi_serve_thumbnail(slide_name: str, wsi: tuple = Depends(get_wsi_session_dep)):
+    """Serve thumbnail for WSI viewer. Must be before /{token}/api/thumbnail/."""
+    session, _, _, _ = wsi
+    return await _serve_thumbnail_impl(session, slide_name)
+
+
+@app.get("/{token}/api/thumbnail/{slide_name}")
+async def serve_thumbnail(token: str, slide_name: str):
+    """Serve thumbnail for a slide."""
     session = get_session_or_404(token)
+    return await _serve_thumbnail_impl(session, slide_name)
+
+
+async def _get_overlay_config_impl(session, slide_name: str, url_for):
+    """Shared impl: overlay config. url_for(api_path) returns full URL e.g. thumbnail/{name} or overlay-file/foo."""
     await resolve_overlay_zip(session)
     density = session.find_overlay_file(slide_name, '_density.png')
     metadata_path = session.find_overlay_file(slide_name, '_metadata.json')
@@ -1459,8 +1567,8 @@ async def get_overlay_config(token: str, slide_name: str):
     thumb = session.find_thumbnail(slide_name)
     available = density is not None and metadata_path is not None
 
-    thumbnail_url = f"/{token}/api/thumbnail/{slide_name}" if thumb else None
-    metadata_url = f"/{token}/api/overlay-file/{slide_name}_metadata.json" if metadata_path else None
+    thumbnail_url = url_for(f"thumbnail/{slide_name}") if thumb else None
+    metadata_url = url_for(f"overlay-file/{slide_name}_metadata.json") if metadata_path else None
 
     # For api_slides sessions: TCA overlay is only available when this specific slide has
     # a non-null tca_url. Slides without tca_url must not show the TCA button even if
@@ -1533,9 +1641,8 @@ async def get_overlay_config(token: str, slide_name: str):
         else:
             slide_metadata = base
 
-    # density_image: use tca_url directly when it's a URL, otherwise serve through local proxy route.
     if density:
-        density_image_url = density if is_url(density) else f"/{token}/api/overlay-file/{slide_name}_density.png"
+        density_image_url = density if is_url(density) else url_for(f"overlay-file/{slide_name}_density.png")
     else:
         density_image_url = None
 
@@ -1543,16 +1650,30 @@ async def get_overlay_config(token: str, slide_name: str):
         "available": available,
         "density_image": density_image_url,
         "metadata": metadata_url,
-        "grid": f"/{token}/api/overlay-file/{slide_name}_grid.json" if grid else None,
+        "grid": url_for(f"overlay-file/{slide_name}_grid.json") if grid else None,
         "thumbnail": thumbnail_url,
         "slide_metadata": slide_metadata,
     }
 
 
-@app.get("/{token}/api/overlay-file/{filename}")
-async def serve_overlay_file(token: str, filename: str):
-    """Serve an overlay file from overlay dir or slides dir."""
+@app.get("/wsi-viewer/api/overlay-config/{slide_name}")
+async def wsi_get_overlay_config(slide_name: str, wsi: tuple = Depends(get_wsi_session_dep)):
+    """Get overlay config for WSI viewer. Must be before /{token}/api/overlay-config/."""
+    session, patient_id, event_id, selected_slide_id = wsi
+    url_for = lambda path: _wsi_url(path, patient_id, event_id, selected_slide_id)
+    return await _get_overlay_config_impl(session, slide_name, url_for)
+
+
+@app.get("/{token}/api/overlay-config/{slide_name}")
+async def get_overlay_config(token: str, slide_name: str):
+    """Get per-slide overlay configuration."""
     session = get_session_or_404(token)
+    url_for = lambda path: f"/{token}/api/{path}"
+    return await _get_overlay_config_impl(session, slide_name, url_for)
+
+
+async def _serve_overlay_file_impl(session, filename: str):
+    """Shared impl: serve overlay file."""
     await resolve_overlay_zip(session)
     for suffix in ['_density.png', '_metadata.json', '_grid.json']:
         if filename.endswith(suffix):
@@ -1563,6 +1684,20 @@ async def serve_overlay_file(token: str, filename: str):
                 return FileResponse(file_path, media_type=media_type)
             break
     raise HTTPException(status_code=404, detail=f"Overlay file not found: {filename}")
+
+
+@app.get("/wsi-viewer/api/overlay-file/{filename}")
+async def wsi_serve_overlay_file(filename: str, wsi: tuple = Depends(get_wsi_session_dep)):
+    """Serve overlay file for WSI viewer. Must be before /{token}/api/overlay-file/."""
+    session, _, _, _ = wsi
+    return await _serve_overlay_file_impl(session, filename)
+
+
+@app.get("/{token}/api/overlay-file/{filename}")
+async def serve_overlay_file(token: str, filename: str):
+    """Serve an overlay file from overlay dir or slides dir."""
+    session = get_session_or_404(token)
+    return await _serve_overlay_file_impl(session, filename)
 
 
 # ========================================

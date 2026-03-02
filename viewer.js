@@ -32,17 +32,24 @@ let currentMeasure = null; // null | { p1: { x, y } }
 let measures = [];
 
 
-// API base URL - derived from session token: path-based /{token}/ or Option C /viewer?token=...
+// API base URL - path-based /{token}/, Option C /viewer?token=..., or URL-only /wsi-viewer?patient_id=&event_id=&selected_slide_id=
 function getSessionToken() {
     const pathSeg = window.location.pathname.split('/')[1] || '';
     if (pathSeg === 'viewer') {
         const params = new URLSearchParams(window.location.search);
         return params.get('token') || '';
     }
+    if (pathSeg === 'wsi-viewer') return '';
     return pathSeg;
 }
+const pathSeg = window.location.pathname.split('/')[1] || '';
+const IS_WSI_VIEWER = pathSeg === 'wsi-viewer';
 const SESSION_TOKEN = getSessionToken();
-const API_BASE = SESSION_TOKEN ? `/${SESSION_TOKEN}` : '';
+const API_BASE = IS_WSI_VIEWER ? '/wsi-viewer' : (SESSION_TOKEN ? `/${SESSION_TOKEN}` : '');
+const API_QUERY = IS_WSI_VIEWER ? new URLSearchParams(window.location.search).toString() : '';
+function apiPath(path) {
+    return API_BASE + path + (API_QUERY ? '?' + API_QUERY : '');
+}
 
 // Session keepalive heartbeat (every 5 minutes)
 if (SESSION_TOKEN) {
@@ -131,11 +138,21 @@ function initializeEventListeners() {
 
 async function loadSlides() {
     try {
-        const response = await fetch(`${API_BASE}/api/slides`, { credentials: 'include' });
-        if (!response.ok) throw new Error('Failed to load slides');
-
-        const data = await response.json();
+        const url = apiPath('/api/slides');
+        const response = await fetch(url, { credentials: 'include' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const d = data.detail;
+        const msg = (Array.isArray(d) ? d.map(x => x.msg || x.loc?.join('.')).join('; ') : (typeof d === 'string' ? d : (d ? JSON.stringify(d) : response.statusText)));
+            console.error('Load slides error:', response.status, msg, 'URL:', url);
+            showToast(`Failed to load slides: ${response.status} ${msg}`, 'error');
+            return;
+        }
         slides = data.slides;
+        if (!Array.isArray(slides)) {
+            showToast('Failed to load slides: invalid response', 'error');
+            return;
+        }
 
         // Update slide count
         document.getElementById('slide-count').textContent =
@@ -151,7 +168,7 @@ async function loadSlides() {
 
     } catch (error) {
         console.error('Load slides error:', error);
-        showToast('Failed to load slides', 'error');
+        showToast('Failed to load slides: ' + (error.message || 'network error'), 'error');
     }
 }
 
@@ -197,7 +214,7 @@ function renderSlidesList() {
 
 async function convertSlide(slideName) {
     try {
-        const response = await fetch(`${API_BASE}/api/convert/${slideName}`, {
+        const response = await fetch(apiPath(`/api/convert/${slideName}`), {
             method: 'POST'
         });
 
@@ -244,7 +261,7 @@ async function loadSlide(slideName) {
 
         // Use GeoTIFFTileSource for all SVS/TIFF files (works for both local and GCS with range requests)
         console.log('Loading with GeoTIFFTileSource (range requests)');
-        const rawSlideUrl = `${API_BASE}/api/raw_slides/${slide.filename}`;
+        const rawSlideUrl = apiPath(`/api/raw_slides/${slide.filename}`);
         loadInViewer(rawSlideUrl, 'geotiff');
 
         // Update slides list
@@ -579,7 +596,7 @@ async function checkDensityOverlayAvailability(slideName) {
     console.log(`Checking overlay availability for: ${slideName}`);
     
     try {
-        const url = `${API_BASE}/api/overlay-config/${slideName}`;
+        const url = apiPath(`/api/overlay-config/${slideName}`);
         console.log(`Fetching: ${url}`);
         
         const configResponse = await fetch(url, { credentials: 'include' });
@@ -611,7 +628,7 @@ async function checkDensityOverlayAvailability(slideName) {
 
 async function loadOverlayConfigForSlide(slideName) {
     try {
-        const configResponse = await fetch(`${API_BASE}/api/overlay-config/${slideName}`, { credentials: 'include' });
+        const configResponse = await fetch(apiPath(`/api/overlay-config/${slideName}`), { credentials: 'include' });
         if (!configResponse.ok) {
             console.log('No overlay config available for current slide');
             window._overlayConfig = null;
