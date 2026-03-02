@@ -10,6 +10,7 @@ let slides = [];
 let densityOverlayImage = null;
 let densityOverlayEnabled = false;
 let densityGridData = null;
+let densityOverlayLoading = false; // guard against concurrent load calls
 let densityMetadata = null;
 
 // Polygon drawing state
@@ -136,6 +137,11 @@ async function loadSlides() {
         // Render slides list
         renderSlidesList();
 
+        // Auto-open default slide when session has one (e.g. from create_session_pid)
+        if (data.default_slide && slides.some(s => s.name === data.default_slide)) {
+            loadSlide(data.default_slide);
+        }
+
     } catch (error) {
         console.error('Load slides error:', error);
         showToast('Failed to load slides', 'error');
@@ -217,6 +223,7 @@ async function loadSlide(slideName) {
         }
         densityOverlayEnabled = false;
         densityGridData = null;
+        densityOverlayLoading = false;
         window._overlayConfig = null;
         window._overlayGridUrl = null;
         
@@ -652,74 +659,69 @@ function showToast(message, type = 'info') {
 
 async function loadDensityOverlay(config) {
     if (!viewer || !config || !config.available) return;
+    if (densityOverlayImage) return; // already loaded
+    if (densityOverlayLoading) return; // already in progress
+    densityOverlayLoading = true;
 
     try {
         // Store the grid URL for later use in toggleDensityOverlay
         window._overlayGridUrl = config.grid;
 
-        // Fetch metadata from the per-slide URL
-        const metadataResponse = await fetch(config.metadata, { credentials: 'include' });
-        if (!metadataResponse.ok) {
-            console.log('Could not load density overlay metadata');
-            return;
+        let overlayWidth = 1.0; // default: full slide width (normalized)
+
+        if (config.metadata) {
+            // Fetch metadata to compute exact overlay scaling
+            const metadataResponse = await fetch(config.metadata, { credentials: 'include' });
+            if (!metadataResponse.ok) {
+                console.log('Could not load density overlay metadata — using full-slide dimensions');
+            } else {
+                const metadata = await metadataResponse.json();
+                console.log('Density overlay metadata loaded:', metadata);
+                densityMetadata = metadata;
+
+                const gridCoverageX = metadata.grid_dimensions[0] * metadata.grid_size;
+                const gridCoverageY = metadata.grid_dimensions[1] * metadata.grid_size;
+                const wsiWidth = metadata.wsi_dimensions[0];
+                const wsiHeight = metadata.wsi_dimensions[1];
+                overlayWidth = gridCoverageX / wsiWidth;
+                console.log(`Overlay scaling: ${overlayWidth.toFixed(4)}, Grid coverage: ${gridCoverageX}x${gridCoverageY}, WSI: ${wsiWidth}x${wsiHeight}`);
+            }
+        } else {
+            // No metadata (e.g. tca_url from external API) — overlay covers full slide
+            console.log('No overlay metadata — rendering tca_url over full slide');
         }
-
-        const metadata = await metadataResponse.json();
-        console.log('Density overlay metadata loaded:', metadata);
-
-        // Store metadata for click handling
-        densityMetadata = metadata;
-
-        // Calculate the overlay dimensions
-        const gridCoverageX = metadata.grid_dimensions[0] * metadata.grid_size;
-        const gridCoverageY = metadata.grid_dimensions[1] * metadata.grid_size;
-
-        // WSI dimensions from metadata
-        const wsiWidth = metadata.wsi_dimensions[0];
-        const wsiHeight = metadata.wsi_dimensions[1];
-
-        // Calculate the overlay width/height in normalized coordinates
-        const overlayWidth = gridCoverageX / wsiWidth;
-        const overlayHeight = (gridCoverageY / wsiHeight) * (wsiHeight / wsiWidth);
-
-        console.log(`Overlay scaling: ${overlayWidth.toFixed(4)} x ${overlayHeight.toFixed(4)}`);
-        console.log(`Grid coverage: ${gridCoverageX}x${gridCoverageY}, WSI: ${wsiWidth}x${wsiHeight}`);
 
         // Use the per-slide density image URL
         const densityMapUrl = config.density_image;
 
-        // Add the density overlay as a simple image with correct scaling
-        const addItemHandler = (event) => {
-            const item = event.item;
-            if (item.source && item.source.url === densityMapUrl) {
-                densityOverlayImage = item;
-                densityOverlayImage.setOpacity(0); // Hide initially
-                viewer.world.removeHandler('add-item', addItemHandler);
-                console.log('Density overlay captured from world event');
-            }
-        };
-        viewer.world.addHandler('add-item', addItemHandler);
-
-        const result = viewer.addSimpleImage({
-            url: densityMapUrl,
-            opacity: 1,
-            x: 0,
-            y: 0,
-            width: overlayWidth,
-            index: 1,
-            preload: true
+        // Wait for the image to be fully added before returning so callers can use densityOverlayImage immediately.
+        await new Promise((resolve, reject) => {
+            viewer.addSimpleImage({
+                url: densityMapUrl,
+                opacity: 0,  // start hidden; shown explicitly by toggleDensityOverlay
+                x: 0,
+                y: 0,
+                width: overlayWidth,
+                index: 1,
+                preload: true,
+                success: (event) => {
+                    densityOverlayImage = event.item;
+                    console.log('Density overlay loaded via success callback');
+                    resolve();
+                },
+                error: (event) => {
+                    console.warn('Density overlay failed to load:', event);
+                    reject(new Error('Failed to load overlay image'));
+                },
+            });
         });
 
-        // Fallback: if it returns the object immediately
-        if (result && !densityOverlayImage) {
-            densityOverlayImage = result;
-            densityOverlayImage.setOpacity(0);
-        }
-
-        console.log('Density overlay add request sent');
+        console.log('Density overlay ready');
 
     } catch (error) {
         console.log('Could not load density overlay:', error.message);
+    } finally {
+        densityOverlayLoading = false;
     }
 }
 
@@ -732,15 +734,25 @@ async function toggleDensityOverlay(slideName) {
 
     // Load overlay if not loaded yet
     if (!densityOverlayImage && window._overlayConfig) {
-        await loadDensityOverlay(window._overlayConfig);
+        try {
+            await loadDensityOverlay(window._overlayConfig);
+        } catch (e) {
+            console.warn('loadDensityOverlay failed:', e.message);
+        }
     }
 
-    // Fallback: If densityOverlayImage is null, try to find it in the world
+    // Fallback: scan world for any overlay item already added
     if (!densityOverlayImage) {
+        const expectedUrl = window._overlayConfig && window._overlayConfig.density_image;
         const count = viewer.world.getItemCount();
         for (let i = 0; i < count; i++) {
             const item = viewer.world.getItemAt(i);
-            if (item.source && item.source.url && item.source.url.includes('_density.png')) {
+            const itemUrl = item.source && item.source.url;
+            if (itemUrl && (
+                (expectedUrl && itemUrl === expectedUrl) ||
+                itemUrl.includes('_density.png') ||
+                itemUrl.includes('tca')
+            )) {
                 densityOverlayImage = item;
                 console.log('Density overlay found in world fallback');
                 break;
@@ -749,7 +761,8 @@ async function toggleDensityOverlay(slideName) {
     }
 
     if (!densityOverlayImage) {
-        // No overlay available - silent, no need to notify user
+        console.warn('TCA toggle: no overlay image available. _overlayConfig:', window._overlayConfig);
+        showToast('TCA overlay not available for this slide', 'info');
         return;
     }
 

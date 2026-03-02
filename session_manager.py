@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 
 ALLOWED_EXTENSIONS = {
@@ -69,45 +69,72 @@ class Session:
     created_at: datetime = field(default_factory=datetime.utcnow)
     # Populated after zip download+extraction; used by find_overlay_file
     overlay_extracted_dir: Optional[str] = field(default=None)
+    # Per-slide overlay dirs (slide_name -> path). When set, overlays are resolved from api_slides
+    # so each slide's tca_url zip is extracted to its own dir and never mixed with others.
+    overlay_extracted_by_slide: Optional[Dict[str, str]] = field(default=None)
     thumbnail_extracted_dir: Optional[str] = field(default=None)
     metadata: Optional[Dict] = field(default=None)  # Optional: width, height, mpp, objective_power, vendor, thumbnail_url
+    # When set, slides/thumbnails come from external API (create_session_pid)
+    api_slides: Optional[List[Dict[str, Any]]] = field(default=None)  # List of {slide_id, slide_url, thumbnail_url, tca_url, meta_data, ...}
+    default_slide_id: Optional[str] = field(default=None)  # Requested slide_id to open by default (first in list)
 
     def touch(self):
         self.last_accessed = datetime.utcnow()
 
     def find_overlay_file(self, slide_name: str, suffix: str) -> Optional[str]:
-        """Find overlay file: check extracted zip dir first, then plain directories."""
-        target = f"{slide_name}{suffix}"
+        """Find overlay file: check extracted zip dir first, then plain directories.
+        Tries both {slide_name}{suffix} (e.g. 1087-25_density.png) and
+        slide{suffix} (e.g. slide_density.png) for each location."""
+        candidates = [f"{slide_name}{suffix}", f"slide{suffix}", suffix.lstrip("_")]
 
-        # 1. Check the extracted zip directory (highest priority)
-        if self.overlay_extracted_dir:
+        def _first_existing(directory: Path) -> Optional[str]:
+            for name in candidates:
+                p = directory / name
+                if p.exists():
+                    return str(p)
+            return None
+
+        # 1a. Per-slide overlay dirs (api_slides): each slide's zip in its own dir — no cross-talk
+        if self.overlay_extracted_by_slide and slide_name in self.overlay_extracted_by_slide:
+            root = Path(self.overlay_extracted_by_slide[slide_name])
+            if root.exists():
+                hit = _first_existing(root)
+                if hit:
+                    return hit
+                for subdir in root.iterdir():
+                    if subdir.is_dir():
+                        hit = _first_existing(subdir)
+                        if hit:
+                            return hit
+
+        # 1b. Single extracted overlay dir (flat list of overlay_paths)
+        if self.overlay_extracted_dir and not self.overlay_extracted_by_slide:
             root = Path(self.overlay_extracted_dir)
-            # Flat: root / SlideName_density.png
-            path = root / target
-            if path.exists():
-                return str(path)
-            # Zip with top-level folder: root / SlideName / SlideName_density.png
+            hit = _first_existing(root)
+            if hit:
+                return hit
             for subdir in root.iterdir():
                 if subdir.is_dir():
-                    path = subdir / target
-                    if path.exists():
-                        return str(path)
+                    hit = _first_existing(subdir)
+                    if hit:
+                        return hit
 
         # 2. Search static overlay directories (skip URLs / zip paths)
         for overlay_path in self.overlay_paths:
             if is_gcs_path(overlay_path) or is_url(overlay_path) or is_zip_path(overlay_path):
                 continue  # These are resolved via overlay_extracted_dir
-            path = Path(overlay_path) / target
-            if path.exists():
-                return str(path)
+            hit = _first_existing(Path(overlay_path))
+            if hit:
+                return hit
 
         # 3. Fall back to slide directories
         for slide_path in self.slide_paths:
             if not is_gcs_path(slide_path):
                 p = Path(slide_path)
-                check_path = p / target if p.is_dir() else p.parent / target
-                if check_path.exists():
-                    return str(check_path)
+                directory = p if p.is_dir() else p.parent
+                hit = _first_existing(directory)
+                if hit:
+                    return hit
 
         return None
 
@@ -151,6 +178,7 @@ class Session:
         if self.overlay_extracted_dir and Path(self.overlay_extracted_dir).exists():
             shutil.rmtree(self.overlay_extracted_dir, ignore_errors=True)
             self.overlay_extracted_dir = None
+        self.overlay_extracted_by_slide = None
         if self.thumbnail_extracted_dir and Path(self.thumbnail_extracted_dir).exists():
             shutil.rmtree(self.thumbnail_extracted_dir, ignore_errors=True)
             self.thumbnail_extracted_dir = None
@@ -170,8 +198,12 @@ class SessionManager:
         overlay_paths: List[str] = None,
         thumbnail_paths: List[str] = None,
         metadata: Optional[Dict] = None,
+        api_slides: Optional[List[Dict[str, Any]]] = None,
+        default_slide_id: Optional[str] = None,
+        token: Optional[str] = None,
     ) -> Session:
-        token = str(uuid.uuid4())
+        if token is None:
+            token = str(uuid.uuid4())
 
         if overlay_paths is None:
             overlay_paths = []
@@ -236,6 +268,8 @@ class SessionManager:
             overlay_paths=normalized_overlay_paths,
             thumbnail_paths=normalized_thumbnail_paths,
             metadata=metadata,
+            api_slides=api_slides,
+            default_slide_id=default_slide_id,
         )
         self.sessions[token] = session
 

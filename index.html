@@ -91,16 +91,19 @@
                     </svg>
                 </button>
                 <button class="control-btn" id="measure-btn" title="Measure Distance">
-                    <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M4 20V4"></path>
-                        <path d="M4 8h4"></path>
-                        <path d="M4 12h7"></path>
-                        <path d="M4 16h4"></path>
-                        <path d="M9 20l3-5 4 2 4-8-4-2-3 5"></path>
-                        <path d="M20 20V4"></path>
-                        <path d="M20 8h-4"></path>
-                        <path d="M20 12h-7"></path>
-                        <path d="M20 16h-4"></path>
+                    <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <!-- L-shaped ruler body: top horizontal bar + left vertical bar -->
+                        <path d="M2 2 H22 V10 H10 V22 H2 Z"></path>
+                        <!-- tick marks on top edge (inside horizontal bar) -->
+                        <line x1="6"  y1="2" x2="6"  y2="5"></line>
+                        <line x1="10" y1="2" x2="10" y2="6.5"></line>
+                        <line x1="14" y1="2" x2="14" y2="5"></line>
+                        <line x1="18" y1="2" x2="18" y2="5"></line>
+                        <!-- tick marks on left edge (inside vertical bar) -->
+                        <line x1="2" y1="6"  x2="5"   y2="6"></line>
+                        <line x1="2" y1="10" x2="6.5" y2="10"></line>
+                        <line x1="2" y1="14" x2="5"   y2="14"></line>
+                        <line x1="2" y1="18" x2="5"   y2="18"></line>
                     </svg>
                 </button>
                 <button class="control-btn" id="fullscreen-btn" title="Fullscreen">

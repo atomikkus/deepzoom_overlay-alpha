@@ -5,6 +5,7 @@ Each session has its own slides directory, overlay, and converter.
 """
 
 import os
+import re
 import asyncio
 import json
 import zipfile
@@ -65,7 +66,7 @@ parser.add_argument("--overlay", type=str, nargs='*', default=None,
                     help="Overlay sources: local directory, local .zip, or http(s) URL to a .zip (e.g. signed URL)")
 parser.add_argument("--thumbnails", type=str, nargs='*', default=None,
                     help="Thumbnail sources: local directory, local .zip, http(s) URL to .zip, or GCS prefix (gs://bucket/prefix/)")
-parser.add_argument("--session-ttl", type=int, default=30,
+parser.add_argument("--session-ttl", type=int, default=60,
                     help="Session TTL in minutes (default: 30)")
 args, unknown = parser.parse_known_args()
 
@@ -98,6 +99,131 @@ if os.getenv("THUMBNAIL_PATHS"):
 
 # Initialize session manager (no cache dir needed without conversion)
 session_mgr = SessionManager(ttl_minutes=args.session_ttl)
+
+# ========================================
+# External API integration config (create_session_pid)
+# Load from integrate_config.json if present, then override with env.
+# ========================================
+INTEGRATE_CONFIG_PATH = Path(__file__).resolve().parent / "integrate_config.json"
+INTEGRATE_CONFIG = {
+    "base_url": os.getenv("EXTERNAL_API_BASE_URL", "").strip().rstrip("/"),
+    "email": os.getenv("EXTERNAL_API_EMAIL", "").strip(),
+    "password": os.getenv("EXTERNAL_API_PASSWORD", "").strip(),
+}
+
+
+def _load_integrate_config() -> dict:
+    out = dict(INTEGRATE_CONFIG)
+    if INTEGRATE_CONFIG_PATH.exists():
+        try:
+            data = json.loads(INTEGRATE_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data.get("base_url"), str):
+                out["base_url"] = data["base_url"].strip().rstrip("/")
+            if isinstance(data.get("email"), str):
+                out["email"] = data["email"].strip()
+            if isinstance(data.get("password"), str):
+                out["password"] = data["password"].strip()
+        except Exception as e:
+            print(f"Warning: Could not load integrate_config.json: {e}")
+    # Env overrides
+    if os.getenv("EXTERNAL_API_BASE_URL"):
+        out["base_url"] = os.getenv("EXTERNAL_API_BASE_URL", "").strip().rstrip("/")
+    if os.getenv("EXTERNAL_API_EMAIL"):
+        out["email"] = os.getenv("EXTERNAL_API_EMAIL", "").strip()
+    if os.getenv("EXTERNAL_API_PASSWORD"):
+        out["password"] = os.getenv("EXTERNAL_API_PASSWORD", "").strip()
+    return out
+
+
+def get_integrate_config() -> dict:
+    return _load_integrate_config()
+
+
+def _external_api_configured() -> bool:
+    c = get_integrate_config()
+    return bool(c.get("base_url") and c.get("email") and c.get("password"))
+
+
+# Optional: httpx for external API calls
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+
+
+async def _external_login() -> Tuple[Optional[str], Optional[str]]:
+    """POST /user/login; return (authToken, error_message). error_message is set on failure."""
+    if not HTTPX_AVAILABLE:
+        return None, "httpx not installed (pip install httpx)"
+    cfg = get_integrate_config()
+    base = cfg.get("base_url") or ""
+    email = cfg.get("email") or ""
+    password = cfg.get("password") or ""
+    if not base or not email:
+        return None, "External API not configured: base_url and email required in integrate_config.json or env"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{base}/user/login",
+                json={"email": email, "password": password},
+            )
+            r.raise_for_status()
+            data = r.json()
+            payload = data.get("payLoad") or data.get("payload")
+            if isinstance(payload, dict) and payload.get("authToken"):
+                return payload["authToken"], None
+            return None, "Login response missing payLoad.authToken"
+    except httpx.ConnectError as e:
+        msg = f"Cannot connect to {base} (is the API running?): {e}"
+        print(f"External API login failed: {msg}")
+        return None, msg
+    except httpx.HTTPStatusError as e:
+        msg = f"Login HTTP {e.response.status_code}: {e.response.text[:200]}"
+        print(f"External API login failed: {msg}")
+        return None, msg
+    except Exception as e:
+        msg = str(e)
+        print(f"External API login failed: {e}")
+        return None, msg
+
+
+async def _fetch_pathology_images(patient_id: str, event_id: str, slide_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """GET /pathology_image/all with Bearer token. Returns (payLoad, error_message)."""
+    if not HTTPX_AVAILABLE:
+        return None, "httpx not installed (pip install httpx)"
+    token, login_err = await _external_login()
+    if not token:
+        return None, login_err or "Login failed"
+    cfg = get_integrate_config()
+    base = cfg.get("base_url") or ""
+    if not base:
+        return None, "External API base_url not set"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.get(
+                f"{base}/pathology_image/all",
+                params={"patient_id": patient_id, "event_id": event_id, "slide_id": slide_id},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            payload = data.get("payLoad") or data.get("payload")
+            if isinstance(payload, dict) and "blocks" in payload:
+                return payload, None
+            return None, "pathology_image/all response missing payLoad.blocks"
+    except httpx.ConnectError as e:
+        msg = f"Cannot connect to {base}: {e}"
+        print(f"External API pathology_image/all failed: {msg}")
+        return None, msg
+    except httpx.HTTPStatusError as e:
+        msg = f"pathology_image/all HTTP {e.response.status_code}: {e.response.text[:200]}"
+        print(f"External API pathology_image/all failed: {msg}")
+        return None, msg
+    except Exception as e:
+        msg = str(e)
+        print(f"External API pathology_image/all failed: {e}")
+        return None, msg
 
 # ========================================
 # Authorization (HTTP Basic Auth)
@@ -322,6 +448,69 @@ class CreateSessionRequest(BaseModel):
     metadata: Optional[dict] = None  # Optional slide metadata: width, height, mpp, objective_power, vendor, thumbnail_url (for scale/physical units)
 
 
+class CreateSessionPidRequest(BaseModel):
+    patient_id: str
+    event_id: str
+    slide_id: str
+
+
+@app.post("/api/create_session_pid")
+async def create_session_pid(req: CreateSessionPidRequest, _: str = Depends(verify_basic_auth)):
+    """Create a viewer session from external API (patient_id, event_id, slide_id). URL uses pid/event/slide combination. Requested slide opens by default (first in list)."""
+    if not _external_api_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="External API not configured. Set base_url, email, password in integrate_config.json or EXTERNAL_API_* env.",
+        )
+    payload, fetch_err = await _fetch_pathology_images(req.patient_id, req.event_id, req.slide_id)
+    if not payload:
+        raise HTTPException(
+            status_code=502,
+            detail=fetch_err or "Failed to fetch pathology images from external API (login or pathology_image/all failed).",
+        )
+    blocks = payload.get("blocks") or []
+    all_slides_raw = []
+    for block in blocks:
+        for s in block.get("slides") or []:
+            if s.get("slide_url"):
+                all_slides_raw.append(s)
+    if not all_slides_raw:
+        raise HTTPException(status_code=404, detail="No slides found for this patient/event.")
+    # Use API's selected_slide_id when present, else request slide_id
+    selected = (payload.get("selected_slide_id") or req.slide_id)
+    selected = str(selected).strip() if selected is not None else str(req.slide_id).strip()
+    # Order so selected slide is first (default open in viewer)
+    rest = [s for s in all_slides_raw if (s.get("slide_id") or "").strip() != selected]
+    first = [s for s in all_slides_raw if (s.get("slide_id") or "").strip() == selected]
+    ordered = first + rest if first else all_slides_raw
+    slide_paths = [s["slide_url"] for s in ordered]
+    # Overlays: resolved per-slide from api_slides[].tca_url in resolve_overlay_zip (no flat list).
+    # Thumbnails: api_slides[].thumbnail_url is used by serve_thumbnail; keep list for direct-URL fallback.
+    overlay_paths = []
+    thumbnail_paths = list({s["thumbnail_url"] for s in ordered if s.get("thumbnail_url")})
+    api_slides = ordered
+    slug = re.sub(r"[^a-zA-Z0-9\-_]", "_", f"{req.patient_id}_{req.event_id}_{req.slide_id}")
+    token = f"pid_{slug}"
+    # If session already exists with this token, replace it
+    session_mgr.create_session(
+        slide_paths,
+        overlay_paths=overlay_paths,
+        thumbnail_paths=thumbnail_paths,
+        api_slides=api_slides,
+        default_slide_id=selected,
+        token=token,
+    )
+    session = session_mgr.get_session(token)
+    return {
+        "token": session.token,
+        "url": f"/{session.token}/",
+        "patient_id": req.patient_id,
+        "event_id": req.event_id,
+        "slide_id": req.slide_id,
+        "default_slide_id": selected,
+    }
+
+
 @app.post("/api/sessions")
 async def create_session(req: CreateSessionRequest, _: str = Depends(verify_basic_auth)):
     """Create a new viewer session."""
@@ -412,6 +601,32 @@ async def list_slides(token: str):
     session = get_session_or_404(token)
     await resolve_overlay_zip(session)
     try:
+        if session.api_slides:
+            all_slides = []
+            default_slide_name = None
+            for s in session.api_slides:
+                slide_url = s.get("slide_url") or ""
+                filename = url_to_slide_filename(slide_url)
+                if not filename:
+                    continue
+                stem = Path(filename).stem
+                if session.default_slide_id and (s.get("slide_id") or "").strip() == str(session.default_slide_id).strip():
+                    default_slide_name = stem
+                thumb_url = s.get("thumbnail_url")
+                if not thumb_url:
+                    thumb_url = f"/{token}/api/thumbnail/{stem}"
+                all_slides.append({
+                    "name": stem,
+                    "filename": filename,
+                    "size": 0,
+                    "viewable": True,
+                    "thumbnail": thumb_url,
+                })
+            out = {"slides": all_slides}
+            if default_slide_name is not None:
+                out["default_slide"] = default_slide_name
+            return out
+
         all_slides = []
         seen_filenames = set()  # To deduplicate slides with same filename
         
@@ -973,13 +1188,53 @@ def _extract_zip_to_tempdir(zip_source: str) -> str:
 
 async def resolve_overlay_zip(session) -> None:
     """
-    For any overlay_path that is a URL or local .zip, download and extract once.
-    Extracted files land in a single temp directory stored on session.overlay_extracted_dir.
+    Resolve overlay zips: either per-slide (api_slides + tca_url) or flat (overlay_paths).
+    Per-slide: each slide's tca_url zip is extracted to its own subdir so overlays never mix.
     No-op if already resolved.
     """
     if session.overlay_extracted_dir:
-        return  # Already resolved
+        return  # Already resolved (flat root or parent of per-slide dirs)
 
+    loop = asyncio.get_event_loop()
+
+    # api_slides: one overlay zip per slide in its own directory (robust per-slide mapping)
+    if session.api_slides:
+        by_slide = {}
+        parent_dir = tempfile.mkdtemp(prefix="wsi_overlay_")
+        try:
+            for s in session.api_slides:
+                tca_url = s.get("tca_url")
+                if not tca_url or not (is_zip_path(tca_url) or is_url(tca_url)):
+                    continue
+                slide_url = s.get("slide_url") or ""
+                filename = url_to_slide_filename(slide_url)
+                if not filename:
+                    continue
+                slide_name = Path(filename).stem
+                if not slide_name:
+                    continue
+                extracted = await loop.run_in_executor(None, _extract_zip_to_tempdir, tca_url)
+                slide_dir = Path(parent_dir) / slide_name
+                slide_dir.mkdir(parents=True, exist_ok=True)
+                for item in Path(extracted).rglob("*"):
+                    if item.is_file():
+                        dest = slide_dir / item.relative_to(extracted)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(item), str(dest))
+                shutil.rmtree(extracted, ignore_errors=True)
+                by_slide[slide_name] = str(slide_dir)
+            if by_slide:
+                session.overlay_extracted_by_slide = by_slide
+                session.overlay_extracted_dir = parent_dir
+                print(f"Overlay zips extracted per-slide to: {parent_dir}")
+            else:
+                shutil.rmtree(parent_dir, ignore_errors=True)
+        except Exception as e:
+            shutil.rmtree(parent_dir, ignore_errors=True)
+            print(f"Warning: Failed to extract overlay zips (api_slides): {e}")
+        return
+
+    # Flat: all overlay_paths zips merged into one dir (legacy / create_session)
     zip_sources = [
         p for p in session.overlay_paths
         if is_zip_path(p) or (is_url(p) and not is_gcs_path(p))
@@ -987,14 +1242,10 @@ async def resolve_overlay_zip(session) -> None:
     if not zip_sources:
         return
 
-    import asyncio
-    loop = asyncio.get_event_loop()
-
     tmp_dir = tempfile.mkdtemp(prefix="wsi_overlay_")
     try:
         for source in zip_sources:
             extracted = await loop.run_in_executor(None, _extract_zip_to_tempdir, source)
-            # Move all files from this extraction into the shared tmp_dir
             for item in Path(extracted).rglob("*"):
                 if item.is_file():
                     dest = Path(tmp_dir) / item.relative_to(extracted)
@@ -1089,8 +1340,20 @@ def _stream_thumbnail_from_gcs(session, slide_name: str):
 
 @app.get("/{token}/api/thumbnail/{slide_name}")
 async def serve_thumbnail(token: str, slide_name: str):
-    """Serve thumbnail for a slide from overlay, slide dir, thumbnail_paths (dir/zip/direct URL), or GCS."""
+    """Serve thumbnail for a slide from overlay, slide dir, thumbnail_paths (dir/zip/direct URL), or GCS; or from API thumbnail_url when api_slides is set."""
     session = get_session_or_404(token)
+    if session.api_slides and HTTPX_AVAILABLE:
+        for s in session.api_slides:
+            url = s.get("slide_url") or ""
+            fname = url_to_slide_filename(url)
+            if fname and Path(fname).stem == slide_name and s.get("thumbnail_url"):
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        r = await client.get(s["thumbnail_url"])
+                        r.raise_for_status()
+                        return Response(content=r.content, media_type=r.headers.get("content-type") or "image/png")
+                except Exception:
+                    break
     await resolve_overlay_zip(session)
     await resolve_thumbnail_zip(session)
     path = session.find_thumbnail(slide_name)
@@ -1124,6 +1387,22 @@ async def get_overlay_config(token: str, slide_name: str):
     thumbnail_url = f"/{token}/api/thumbnail/{slide_name}" if thumb else None
     metadata_url = f"/{token}/api/overlay-file/{slide_name}_metadata.json" if metadata_path else None
 
+    # For api_slides sessions: TCA overlay is only available when this specific slide has
+    # a non-null tca_url. Slides without tca_url must not show the TCA button even if
+    # generic overlay files (density.png, slide_density.png) from another slide's zip exist
+    # in the shared extraction directory.
+    if session.api_slides:
+        slide_has_tca = False
+        for s in session.api_slides:
+            slide_url = s.get("slide_url") or ""
+            filename_from_url = url_to_slide_filename(slide_url)
+            if filename_from_url and Path(filename_from_url).stem == slide_name:
+                slide_has_tca = bool(s.get("tca_url"))
+                break
+        if not slide_has_tca:
+            available = False
+            density = None
+
     # slide_metadata for scale (mpp → physical units). From overlay metadata.json and/or session.metadata (create session).
     # Expected keys: width, height, mpp, objective_power, vendor, thumbnail_url (all optional).
     slide_metadata = None
@@ -1141,6 +1420,33 @@ async def get_overlay_config(token: str, slide_name: str):
             }
         except Exception:
             slide_metadata = {"thumbnail_url": thumbnail_url}
+    # Per-slide metadata from external API (create_session_pid). meta_data values are strings — convert to float/int.
+    if session.api_slides:
+        for s in session.api_slides:
+            slide_url = s.get("slide_url") or ""
+            filename_from_url = url_to_slide_filename(slide_url)
+            if filename_from_url and Path(filename_from_url).stem == slide_name:
+                raw_meta = s.get("meta_data") or {}
+                def _try_float(v):
+                    try:
+                        return float(v) if v is not None else None
+                    except (ValueError, TypeError):
+                        return None
+                api_meta = {
+                    "width": _try_float(raw_meta.get("width")),
+                    "height": _try_float(raw_meta.get("height")),
+                    "mpp": _try_float(raw_meta.get("mpp")),
+                    "objective_power": _try_float(raw_meta.get("objective_power")),
+                    "vendor": raw_meta.get("vendor"),
+                    "thumbnail_url": s.get("thumbnail_url") or thumbnail_url,
+                }
+                if slide_metadata:
+                    for k in ("width", "height", "mpp", "objective_power", "vendor", "thumbnail_url"):
+                        if api_meta.get(k) is not None:
+                            slide_metadata[k] = api_meta[k]
+                else:
+                    slide_metadata = api_meta
+                break
     if session.metadata and isinstance(session.metadata, dict):
         base = dict(session.metadata)
         base.setdefault("thumbnail_url", thumbnail_url)
@@ -1152,9 +1458,15 @@ async def get_overlay_config(token: str, slide_name: str):
         else:
             slide_metadata = base
 
+    # density_image: use tca_url directly when it's a URL, otherwise serve through local proxy route.
+    if density:
+        density_image_url = density if is_url(density) else f"/{token}/api/overlay-file/{slide_name}_density.png"
+    else:
+        density_image_url = None
+
     return {
         "available": available,
-        "density_image": f"/{token}/api/overlay-file/{slide_name}_density.png" if density else None,
+        "density_image": density_image_url,
         "metadata": metadata_url,
         "grid": f"/{token}/api/overlay-file/{slide_name}_grid.json" if grid else None,
         "thumbnail": thumbnail_url,

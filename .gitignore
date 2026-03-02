@@ -49,6 +49,7 @@ cache/*
 *.json
 !package.json
 !package-lock.json
+!integrate_config.json.example
 *.key
 *.pem
 *.p12
