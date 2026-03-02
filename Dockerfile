@@ -22,12 +22,13 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy application files (do not copy integrate_config.json — use env vars in deployment)
 COPY app.py .
 COPY session_manager.py .
 COPY index.html .
 COPY viewer.js .
 COPY styles.css .
+COPY logo.svg .
 
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/cache
@@ -35,6 +36,13 @@ RUN mkdir -p /app/uploads /app/cache
 # Cloud Run sets PORT at runtime (default 8080); GKE can set it too
 ENV PORT=8080
 EXPOSE 8080
+
+# Required at runtime when using protected APIs (create/list/delete sessions, GCS, etc.):
+#   AUTH_USERNAME, AUTH_PASSWORD
+# Optional — for create_session_pid (external API); use a URL reachable from the container, not localhost:
+#   EXTERNAL_API_BASE_URL, EXTERNAL_API_EMAIL, EXTERNAL_API_PASSWORD
+# Optional — public base URL for viewer; when set, create_session and create_session_pid responses include full_url:
+#   VIEWER_PUBLIC_BASE_URL (e.g. https://viewer.example.com)
 
 # Health check: use PORT so Cloud Run/GKE can probe correctly
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

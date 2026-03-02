@@ -32,9 +32,16 @@ let currentMeasure = null; // null | { p1: { x, y } }
 let measures = [];
 
 
-// API base URL - derived from the session token in the URL path
-// e.g., if URL is /a8f3k2x9/, API_BASE becomes /a8f3k2x9
-const SESSION_TOKEN = window.location.pathname.split('/')[1] || '';
+// API base URL - derived from session token: path-based /{token}/ or Option C /viewer?token=...
+function getSessionToken() {
+    const pathSeg = window.location.pathname.split('/')[1] || '';
+    if (pathSeg === 'viewer') {
+        const params = new URLSearchParams(window.location.search);
+        return params.get('token') || '';
+    }
+    return pathSeg;
+}
+const SESSION_TOKEN = getSessionToken();
 const API_BASE = SESSION_TOKEN ? `/${SESSION_TOKEN}` : '';
 
 // Session keepalive heartbeat (every 5 minutes)

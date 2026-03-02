@@ -13,11 +13,12 @@ import tempfile
 import shutil
 import argparse
 import urllib.request
+from urllib.parse import urlencode
 from pathlib import Path
 from typing import Optional, Tuple, List
 from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request, Depends
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -142,6 +143,28 @@ def get_integrate_config() -> dict:
 def _external_api_configured() -> bool:
     c = get_integrate_config()
     return bool(c.get("base_url") and c.get("email") and c.get("password"))
+
+
+def _viewer_full_url(token: str) -> Optional[str]:
+    """Build full viewer URL when VIEWER_PUBLIC_BASE_URL is set; otherwise return None."""
+    base = (os.getenv("VIEWER_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/{token}/"
+
+
+def _viewer_query_url(pid: str, eid: str, sid: str, token: str) -> str:
+    """Build Option C hybrid URL: /viewer?pid=...&eid=...&sid=...&token=..."""
+    q = urlencode({"pid": pid, "eid": eid, "sid": sid, "token": token})
+    return f"/viewer?{q}"
+
+
+def _viewer_query_full_url(pid: str, eid: str, sid: str, token: str) -> Optional[str]:
+    """Build full Option C URL when VIEWER_PUBLIC_BASE_URL is set."""
+    base = (os.getenv("VIEWER_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}{_viewer_query_url(pid, eid, sid, token)}"
 
 
 # Optional: httpx for external API calls
@@ -456,20 +479,20 @@ class CreateSessionRequest(BaseModel):
 
 
 class CreateSessionPidRequest(BaseModel):
-    patient_id: str
-    event_id: str
-    slide_id: str
+    selected_slide_id: str  # user-entered slide_id
+    event_id: str           # row id
+    patient_id: str         # uuid
 
 
 @app.post("/api/create_session_pid")
 async def create_session_pid(req: CreateSessionPidRequest, _: str = Depends(verify_basic_auth)):
-    """Create a viewer session from external API (patient_id, event_id, slide_id). URL uses pid/event/slide combination. Requested slide opens by default (first in list)."""
+    """Create a viewer session from external API. Body: selected_slide_id, event_id, patient_id. Returns Option C URL: /viewer?pid=...&eid=...&sid=...&token=uuid. Requested slide opens by default (first in list)."""
     if not _external_api_configured():
         raise HTTPException(
             status_code=503,
             detail="External API not configured. Set base_url, email, password in integrate_config.json or EXTERNAL_API_* env.",
         )
-    payload, fetch_err = await _fetch_pathology_images(req.patient_id, req.event_id, req.slide_id)
+    payload, fetch_err = await _fetch_pathology_images(req.patient_id, req.event_id, req.selected_slide_id)
     if not payload:
         raise HTTPException(
             status_code=502,
@@ -483,39 +506,39 @@ async def create_session_pid(req: CreateSessionPidRequest, _: str = Depends(veri
                 all_slides_raw.append(s)
     if not all_slides_raw:
         raise HTTPException(status_code=404, detail="No slides found for this patient/event.")
-    # Use API's selected_slide_id when present, else request slide_id
-    selected = (payload.get("selected_slide_id") or req.slide_id)
-    selected = str(selected).strip() if selected is not None else str(req.slide_id).strip()
+    # Use API's selected_slide_id when present, else request selected_slide_id
+    selected = (payload.get("selected_slide_id") or req.selected_slide_id)
+    selected = str(selected).strip() if selected is not None else str(req.selected_slide_id).strip()
     # Order so selected slide is first (default open in viewer)
     rest = [s for s in all_slides_raw if (s.get("slide_id") or "").strip() != selected]
     first = [s for s in all_slides_raw if (s.get("slide_id") or "").strip() == selected]
     ordered = first + rest if first else all_slides_raw
     slide_paths = [s["slide_url"] for s in ordered]
-    # Overlays: resolved per-slide from api_slides[].tca_url in resolve_overlay_zip (no flat list).
-    # Thumbnails: api_slides[].thumbnail_url is used by serve_thumbnail; keep list for direct-URL fallback.
     overlay_paths = []
     thumbnail_paths = list({s["thumbnail_url"] for s in ordered if s.get("thumbnail_url")})
     api_slides = ordered
-    slug = re.sub(r"[^a-zA-Z0-9\-_]", "_", f"{req.patient_id}_{req.event_id}_{req.slide_id}")
-    token = f"pid_{slug}"
-    # If session already exists with this token, replace it
-    session_mgr.create_session(
+    # UUID token for security; Option C URL includes pid/eid/sid for readability
+    session = session_mgr.create_session(
         slide_paths,
         overlay_paths=overlay_paths,
         thumbnail_paths=thumbnail_paths,
         api_slides=api_slides,
         default_slide_id=selected,
-        token=token,
+        token=None,
     )
-    session = session_mgr.get_session(token)
-    return {
+    url = _viewer_query_url(req.patient_id, req.event_id, req.selected_slide_id, session.token)
+    resp = {
         "token": session.token,
-        "url": f"/{session.token}/",
+        "url": url,
         "patient_id": req.patient_id,
         "event_id": req.event_id,
-        "slide_id": req.slide_id,
+        "slide_id": req.selected_slide_id,
         "default_slide_id": selected,
     }
+    full_url = _viewer_query_full_url(req.patient_id, req.event_id, req.selected_slide_id, session.token)
+    if full_url is not None:
+        resp["full_url"] = full_url
+    return resp
 
 
 @app.post("/api/sessions")
@@ -529,7 +552,7 @@ async def create_session(req: CreateSessionRequest, _: str = Depends(verify_basi
     overlay_paths = req.overlay if req.overlay else []
     thumb_paths = req.thumbnail if req.thumbnail else []
     session = session_mgr.create_session(req.slides, overlay_paths, thumbnail_paths=thumb_paths, metadata=req.metadata)
-    return {
+    resp = {
         "token": session.token,
         "url": f"/{session.token}/",
         "slide_paths": session.slide_paths,
@@ -537,6 +560,10 @@ async def create_session(req: CreateSessionRequest, _: str = Depends(verify_basi
         "thumbnail_paths": session.thumbnail_paths,
         "metadata": session.metadata,
     }
+    full_url = _viewer_full_url(session.token)
+    if full_url is not None:
+        resp["full_url"] = full_url
+    return resp
 
 
 @app.delete("/api/sessions/{token}")
@@ -576,7 +603,42 @@ async def list_sessions(_: str = Depends(verify_basic_auth)):
 
 
 # ========================================
-# Session-Scoped: Static Files
+# Option C: /viewer?pid=...&eid=...&sid=...&token=... (hybrid URL)
+# Must be declared before /{token}/ so "viewer" is not captured as token.
+# ========================================
+
+@app.get("/viewer")
+async def viewer_query_redirect(request: Request):
+    """Redirect /viewer to /viewer/ so relative asset URLs resolve under /viewer/."""
+    path = "/viewer/"
+    q = request.url.query
+    return RedirectResponse(url=f"{path}?{q}" if q else path, status_code=302)
+
+
+@app.get("/viewer/")
+async def viewer_query(token: str = Query(..., description="Session token (required)")):
+    """Serve the viewer HTML when using Option C URL. Token must be in query string."""
+    get_session_or_404(token)
+    return FileResponse('index.html')
+
+
+@app.get("/viewer/styles.css")
+async def viewer_css():
+    return FileResponse('styles.css', media_type='text/css')
+
+
+@app.get("/viewer/viewer.js")
+async def viewer_js():
+    return FileResponse('viewer.js', media_type='application/javascript')
+
+
+@app.get("/viewer/logo.svg")
+async def viewer_logo():
+    return FileResponse('logo.svg', media_type='image/svg+xml')
+
+
+# ========================================
+# Session-Scoped: Static Files (path-based /{token}/)
 # ========================================
 
 @app.get("/{token}/")
