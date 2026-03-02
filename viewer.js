@@ -278,6 +278,9 @@ async function loadInViewer(sourceUrl, type) {
     }
 
     viewerContainer.innerHTML = '';
+    // Overlay nodes were removed from DOM; drop refs so they are re-created when user draws/labels on the new slide
+    polygonSvgOverlay = null;
+    labelSvgOverlay = null;
 
     let tileSources = sourceUrl;
 
@@ -847,8 +850,7 @@ function handleDensityClick(event) {
 
     if (row >= 0 && row < densityGridData.grid_dimensions[1] &&
         col >= 0 && col < densityGridData.grid_dimensions[0]) {
-        const count = densityGridData.density[row][col];
-        showToast(`Cancer cells in this region: ${Math.round(count)}`, 'info');
+        // Density count available but not shown (per user preference)
     }
 }
 
@@ -1610,27 +1612,30 @@ function isPointInPolygon(point, polygonPoints) {
 }
 
 function clearAllPolygons() {
-    const totalCount = polygons.length + labels.length + measures.length;
-    if (totalCount === 0) {
-        showToast('No annotations to clear', 'info');
+    const currentSlidePolygons = polygons.filter(p => p.slide === currentSlide);
+    const currentSlideLabels = labels.filter(l => l.slide === currentSlide);
+    const currentSlideMeasures = measures.filter(m => m.slide === currentSlide);
+    const currentSlideCount = currentSlidePolygons.length + currentSlideLabels.length + currentSlideMeasures.length;
+    if (currentSlideCount === 0) {
+        showToast('No annotations to clear on this slide', 'info');
         return;
     }
     const parts = [];
-    if (polygons.length) parts.push(`${polygons.length} polygon${polygons.length !== 1 ? 's' : ''}`);
-    if (labels.length) parts.push(`${labels.length} label${labels.length !== 1 ? 's' : ''}`);
-    if (measures.length) parts.push(`${measures.length} measure${measures.length !== 1 ? 's' : ''}`);
-    const confirmed = confirm(`Delete all ${parts.join(', ')}?`);
+    if (currentSlidePolygons.length) parts.push(`${currentSlidePolygons.length} polygon${currentSlidePolygons.length !== 1 ? 's' : ''}`);
+    if (currentSlideLabels.length) parts.push(`${currentSlideLabels.length} label${currentSlideLabels.length !== 1 ? 's' : ''}`);
+    if (currentSlideMeasures.length) parts.push(`${currentSlideMeasures.length} measure${currentSlideMeasures.length !== 1 ? 's' : ''}`);
+    const confirmed = confirm(`Delete all ${parts.join(', ')} on this slide?`);
     if (!confirmed) return;
 
-    polygons = [];
+    polygons = polygons.filter(p => p.slide !== currentSlide);
     currentPolygon = [];
-    labels = [];
-    measures = [];
+    labels = labels.filter(l => l.slide !== currentSlide);
+    measures = measures.filter(m => m.slide !== currentSlide);
     currentMeasure = null;
 
     updatePolygonOverlay();
     updateLabelOverlay();
-    showToast('All annotations cleared', 'success');
+    showToast('All annotations on this slide cleared', 'success');
 }
 
 // ========================================

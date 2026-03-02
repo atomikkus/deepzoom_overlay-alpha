@@ -230,13 +230,20 @@ async def _fetch_pathology_images(patient_id: str, event_id: str, slide_id: str)
 # ========================================
 # Auth is required only for global API: create/list/delete sessions, heartbeat, GCS.
 # Session viewer routes (/{token}/...) do NOT require auth; the token in the URL is the credential.
-AUTH_USERNAME = os.getenv("AUTH_USERNAME", "satya@4basecare.com")
-AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "satya123")
+# No default credentials; set AUTH_USERNAME and AUTH_PASSWORD in production.
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "").strip()
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "").strip()
 security = HTTPBasic()
 
 
 def verify_basic_auth(credentials: HTTPBasicCredentials = Depends(security)):
     """Verify HTTP Basic Auth credentials. Used only on global API routes. Raises 401 if invalid."""
+    if not AUTH_USERNAME or not AUTH_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="Server authentication not configured. Set AUTH_USERNAME and AUTH_PASSWORD environment variables.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
     if credentials.username != AUTH_USERNAME or credentials.password != AUTH_PASSWORD:
         raise HTTPException(
             status_code=401,
@@ -589,6 +596,12 @@ async def session_css(token: str):
 async def session_js(token: str):
     get_session_or_404(token)
     return FileResponse('viewer.js', media_type='application/javascript')
+
+
+@app.get("/{token}/logo.svg")
+async def session_logo(token: str):
+    get_session_or_404(token)
+    return FileResponse('logo.svg', media_type='image/svg+xml')
 
 
 # ========================================
