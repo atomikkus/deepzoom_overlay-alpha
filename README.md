@@ -22,12 +22,9 @@ gcloud run deploy wsi-viewer \
   --source . \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars "AUTH_USERNAME=your_user,AUTH_PASSWORD=your_secret_password" \
-  --set-env-vars "VIEWER_PUBLIC_BASE_URL=https://wsi-viewer-xxxx.run.app" \
-  --set-env-vars "EXTERNAL_API_BASE_URL=https://your-api.example.com,EXTERNAL_API_EMAIL=api@example.com,EXTERNAL_API_PASSWORD=your_api_password"
+  --set-env-vars "AUTH_USERNAME=<value>,AUTH_PASSWORD=<value>" \
+  --set-env-vars "EXTERNAL_API_BASE_URL=<value>,EXTERNAL_API_EMAIL=<value>,EXTERNAL_API_PASSWORD=<value>"
 ```
-
-After the first deploy, replace `https://wsi-viewer-xxxx.run.app` with the URL Cloud Run prints (e.g. `https://wsi-viewer-xxxx-uc.a.run.app`) and redeploy so `VIEWER_PUBLIC_BASE_URL` matches the real service URL.
 
 ## Environment variables
 
@@ -35,9 +32,8 @@ After the first deploy, replace `https://wsi-viewer-xxxx.run.app` with the URL C
 |----------|-------------|
 | **AUTH_USERNAME** | Username for server authentication (create/list/delete sessions). |
 | **AUTH_PASSWORD** | Password for server authentication. |
-| **VIEWER_PUBLIC_BASE_URL** | Public base URL of the viewer (e.g. `https://wsi-viewer-xxxx.run.app`). Used so session responses can return full viewer URLs. |
-| **EXTERNAL_API_BASE_URL** | Optional. Base URL of the external API (used with email/password for `create_session_pid`). |
-| **EXTERNAL_API_EMAIL** | Optional. With base_url, for external API authentication. |
-| **EXTERNAL_API_PASSWORD** | Optional. With base_url, for external API authentication. |
+| **EXTERNAL_API_BASE_URL** | Base URL of the external API (used with email/password for `create_session_pid`). |
+| **EXTERNAL_API_EMAIL** | Email for external API authentication. |
+| **EXTERNAL_API_PASSWORD** | Password for external API authentication. |
 
 **PORT** is set by Cloud Run; do not set it yourself.
